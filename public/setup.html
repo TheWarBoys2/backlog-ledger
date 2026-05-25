@@ -200,26 +200,22 @@
       </section>
 
       <!-- =========================================================
-           Step 4 — First user / owner
+           Step 4 — Admin password (server-level secret only)
+           Profile creation lives in Part 2 (/first-profile) so it can guide
+           the user through Steam linking, library sync, and imports properly.
            ========================================================= -->
       <section class="step-panel" data-step="4">
-        <h2 class="step-title">Create the first ledger user</h2>
-        <p class="step-lede">This first profile is treated as the owner of the ledger.</p>
+        <h2 class="step-title">Set an admin password</h2>
+        <p class="step-lede">A simple password that protects server-side admin actions.</p>
         <div class="step-body">
-          <div class="field">
-            <label for="owner_display_name">Display name <span class="req">*</span></label>
-            <input id="owner_display_name" name="owner_display_name" type="text" placeholder="e.g. Alex" required />
-            <small>Shown in the leaderboard and Discord posts.</small>
-          </div>
-          <div class="field">
-            <label for="owner_avatar_url">Avatar URL (optional)</label>
-            <input id="owner_avatar_url" name="owner_avatar_url" type="text" placeholder="Leave blank to use the Steam avatar from the next step" autocomplete="off" />
-            <small>If left blank, we'll use the avatar from your Steam profile.</small>
-          </div>
           <div class="field">
             <label for="admin_password">Admin password <span class="req">*</span></label>
             <input id="admin_password" name="admin_password" type="password" placeholder="At least 6 characters" autocomplete="new-password" required />
-            <small>Protects admin actions like the debug page. <strong>Only the owner needs this &mdash; don't share it.</strong></small>
+            <small>
+              Protects admin actions like the debug page and any future settings page.
+              <strong>Only the host needs this &mdash; don't share it.</strong>
+              This is a server password, not your ledger profile &mdash; you'll create your profile in a moment.
+            </small>
           </div>
         </div>
         <div class="wizard-nav">
@@ -229,44 +225,9 @@
       </section>
 
       <!-- =========================================================
-           Step 5 — First Steam profile
+           Step 5 — Defaults
            ========================================================= -->
       <section class="step-panel" data-step="5">
-        <h2 class="step-title">Add your first Steam profile</h2>
-        <p class="step-lede">We'll link this Steam account to the user you just created.</p>
-        <div class="step-body">
-          <div class="field">
-            <label for="steam_input">Steam profile URL or SteamID64 <span class="req">*</span></label>
-            <input id="steam_input" name="steam_input" type="text" placeholder="https://steamcommunity.com/id/yourname  or  76561198…" autocomplete="off" required />
-            <small>
-              Paste your full Steam profile URL, your vanity name, or your 17-digit SteamID64. Either works.
-            </small>
-            <div class="test-row">
-              <button type="button" class="btn-test" id="btn-test-profile">Look up profile</button>
-              <span id="profile-result" class="test-result"></span>
-            </div>
-          </div>
-          <div class="field">
-            <label for="steam_label">Label (optional)</label>
-            <input id="steam_label" name="steam_label" type="text" placeholder="Main" autocomplete="off" />
-            <small>How this account shows up if you later add a second Steam account to the same user.</small>
-          </div>
-          <p class="muted small" id="profile-help" style="display:none;">
-            Couldn't find the profile? Common causes:
-            invalid profile URL or SteamID64, a private Steam profile (game details hidden),
-            an invalid Steam API key, or Steam being temporarily unavailable.
-          </p>
-        </div>
-        <div class="wizard-nav">
-          <button type="button" class="btn-test" data-back>Back</button>
-          <div class="right"><button type="button" class="btn-primary" data-next>Continue</button></div>
-        </div>
-      </section>
-
-      <!-- =========================================================
-           Step 6 — Defaults
-           ========================================================= -->
-      <section class="step-panel" data-step="6">
         <h2 class="step-title">Basic ledger defaults</h2>
         <p class="step-lede">Sensible starting values &mdash; tweak any of these later.</p>
         <div class="step-body">
@@ -298,22 +259,21 @@
       </section>
 
       <!-- =========================================================
-           Step 7 — Finish
+           Step 6 — Finish (Part 1)
+           Hands off to Part 2 (/first-profile) for actual profile creation.
            ========================================================= -->
-      <section class="step-panel" data-step="7">
-        <h2 class="step-title">Ready to open the ledger</h2>
-        <p class="step-lede">One click and the office is open for business.</p>
+      <section class="step-panel" data-step="6">
+        <h2 class="step-title">Server setup complete</h2>
+        <p class="step-lede">One more short wizard to create your profile, then you're in.</p>
         <div class="step-body" id="finish-body">
-          <p>We'll save everything and take you straight to the dashboard.</p>
+          <p>We'll save your settings, then walk you through creating your first profile &mdash;
+            linking your Steam account, syncing your library, and (optionally) importing your purchase history.</p>
           <p>The ledger is reachable at: <span class="url-line" id="local-url">http://localhost</span></p>
-          <p class="muted small" id="lan-line" style="display:none;">
-            On the same network try: <span class="url-line" id="lan-url"></span>
-          </p>
         </div>
         <div class="wizard-nav">
           <button type="button" class="btn-test" data-back>Back</button>
           <div class="right">
-            <button type="button" class="btn-primary" id="btn-finish">Open Ledger</button>
+            <button type="button" class="btn-primary" id="btn-finish">Continue to profile setup</button>
             <span id="submit-result" class="test-result"></span>
           </div>
         </div>
@@ -326,19 +286,15 @@
     // ---------- Wizard state ----------
     // We keep state in one object so each step is a pure read/write against this.
     // Reaching the final step posts the whole thing to /api/setup/complete in one go.
-    const STEP_TITLES = ['Welcome', 'Hosting', 'Steam Key', 'First User', 'Steam Profile', 'Defaults', 'Finish'];
+    // Part 1 of two — server settings only. Profile creation happens in Part 2 (/first-profile).
+    const STEP_TITLES = ['Welcome', 'Hosting', 'Steam Key', 'Admin', 'Defaults', 'Finish'];
     const TOTAL = STEP_TITLES.length;
     const state = {
       hosting_mode: 'local',
       server_port: 47821,
       steam_api_key: '',
       steam_tested_ok: false,
-      owner_display_name: '',
-      owner_avatar_url: '',
       admin_password: '',
-      steam_input: '',
-      steam_label: 'Main',
-      steam_profile_resolved: null, // last successful resolve result
       default_currency: 'GBP',
       min_played_hours: '',
       free_no_price: true,
@@ -402,29 +358,18 @@
         return null;
       },
       4: () => {
-        const name = val('owner_display_name');
         const pw = val('admin_password');
-        if (!name) return 'Please enter a display name for the first user.';
         if (pw.length < 6) return 'Admin password must be at least 6 characters.';
-        state.owner_display_name = name;
-        state.owner_avatar_url = val('owner_avatar_url');
         state.admin_password = pw;
         return null;
       },
       5: () => {
-        const input = val('steam_input');
-        if (!input) return 'Please enter a Steam profile URL or SteamID64.';
-        state.steam_input = input;
-        state.steam_label = val('steam_label') || 'Main';
-        return null;
-      },
-      6: () => {
         state.default_currency = val('default_currency') || 'GBP';
         state.min_played_hours = val('min_played_hours');
         state.free_no_price = $('free_no_price').checked;
         return null;
       },
-      7: () => null,
+      6: () => null,
     };
 
     function goNext() {
@@ -478,34 +423,7 @@
       }
     });
 
-    // ---------- Step 5 — look up the Steam profile ----------
-    $('btn-test-profile').addEventListener('click', async () => {
-      const input = val('steam_input');
-      if (!input) return showResult('profile-result', false, '✗ Enter a Steam profile URL or SteamID64');
-      if (!state.steam_api_key) return showResult('profile-result', false, '✗ Steam API key missing — go back to step 3');
-      showResult('profile-result', true, 'Looking up…');
-      $('profile-help').style.display = 'none';
-      try {
-        const res = await fetch('/api/setup/test-profile', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ steam_api_key: state.steam_api_key, steam_input: input })
-        });
-        const data = await res.json();
-        if (data.ok) {
-          state.steam_profile_resolved = data;
-          showResult('profile-result', true, '✓ Found ' + (data.persona_name || data.steam_id));
-        } else {
-          state.steam_profile_resolved = null;
-          showResult('profile-result', false, '✗ ' + (data.error || 'Profile lookup failed'));
-          $('profile-help').style.display = 'block';
-        }
-      } catch (err) {
-        showResult('profile-result', false, '✗ ' + err.message);
-        $('profile-help').style.display = 'block';
-      }
-    });
-
-    // ---------- Step 7 — populate finish URLs ----------
+    // ---------- Finish step — populate URL ----------
     function populateFinish() {
       // Local URL — always show whatever the browser is on (origin), since this is the URL
       // the host computer itself uses. We deliberately skip LAN detection: that would need
@@ -514,10 +432,10 @@
       $('local-url').textContent = window.location.origin;
     }
 
-    // ---------- Step 7 — submit ----------
+    // ---------- Finish step — submit ----------
     $('btn-finish').addEventListener('click', async () => {
       // Final validation across every step so we don't POST a half-filled payload.
-      for (let s = 1; s <= 6; s++) {
+      for (let s = 1; s <= TOTAL - 1; s++) {
         const err = validators[s]?.();
         if (err) { showResult('submit-result', false, '✗ ' + err); showStep(s); return; }
       }
@@ -527,14 +445,6 @@
         port: state.server_port,
         steam_api_key: state.steam_api_key,
         admin_password: state.admin_password,
-        first_user: {
-          display_name: state.owner_display_name,
-          avatar_url: state.owner_avatar_url || null,
-        },
-        first_profile: {
-          steam_input: state.steam_input,
-          label: state.steam_label,
-        },
         defaults: {
           currency: state.default_currency,
           min_played_hours: state.min_played_hours === '' ? null : Number(state.min_played_hours),
@@ -549,16 +459,15 @@
         const data = await res.json();
         if (res.ok && data.ok) {
           if (data.port_will_swap) {
-            // The server will close its current listener and re-bind on chosen_port within
-            // ~750ms. Wait a bit longer than that so the new listener is ready, then redirect
-            // the browser to the new URL. The user never has to restart anything by hand.
-            const newUrl = `${window.location.protocol}//${window.location.hostname}:${data.chosen_port}/`;
+            // Server is re-binding to the new port (~750ms). Wait for it, then
+            // redirect to Part 2 on the new URL — the user never has to restart.
+            const newUrl = `${window.location.protocol}//${window.location.hostname}:${data.chosen_port}/first-profile`;
             showResult('submit-result', true,
-              `✓ Setup complete! Switching to port ${data.chosen_port}…`);
+              `✓ Server ready on port ${data.chosen_port}. Loading profile setup…`);
             setTimeout(() => { window.location.href = newUrl; }, 1800);
           } else {
-            showResult('submit-result', true, '✓ Setup complete! Opening the ledger…');
-            setTimeout(() => { window.location.href = '/'; }, 900);
+            showResult('submit-result', true, '✓ Server ready! Loading profile setup…');
+            setTimeout(() => { window.location.href = '/first-profile'; }, 900);
           }
         } else {
           const msg = data.error || 'Setup failed';

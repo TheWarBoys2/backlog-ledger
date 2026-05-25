@@ -632,10 +632,65 @@ function pauseSteamMetadata(reason, meta = {}) {
 }
 function resumeSteamMetadata() {
   deleteConfig('steam_metadata_paused_json');
+  if (steamMetadataState.status === 'paused') {
+    steamMetadataState.status = 'idle';
+    steamMetadataState.pause = null;
+  }
 }
+
+// Live tracker for the help-button status indicator.
+const steamMetadataState = {
+  status: 'idle', // 'idle' | 'running' | 'paused' | 'done' | 'error'
+  total: 0,
+  checked: 0,
+  updated: 0,
+  failed: 0,
+  rate_limited: 0,
+  started_at: null,
+  finished_at: null,
+  pause: null,
+};
+
+// Background queue so syncs don't block on Steam Store metadata fetches.
+const steamMetadataQueue = new Set();
+let steamMetadataDraining = false;
+
+function queueSteamMetadataRefresh(appIds, opts = {}) {
+  const ids = (appIds || []).map(Number).filter(id => Number.isInteger(id) && id > 0);
+  if (!ids.length) return;
+  for (const id of ids) steamMetadataQueue.add(id);
+  if (steamMetadataDraining) return;
+  drainSteamMetadataQueue(opts).catch(err => {
+    logger.error('Background Steam metadata drain crashed', { error: err.message });
+    steamMetadataState.status = 'error';
+    steamMetadataState.finished_at = Date.now();
+  });
+}
+
+async function drainSteamMetadataQueue(opts = {}) {
+  if (steamMetadataDraining) return;
+  steamMetadataDraining = true;
+  try {
+    while (steamMetadataQueue.size > 0) {
+      const batch = [...steamMetadataQueue];
+      steamMetadataQueue.clear();
+      await refreshSteamMetadataForAppIds(batch, opts);
+      if (getSteamMetadataPause()) break;
+    }
+  } finally {
+    steamMetadataDraining = false;
+    if (steamMetadataState.status === 'running' && steamMetadataQueue.size === 0) {
+      steamMetadataState.status = 'done';
+      steamMetadataState.finished_at = Date.now();
+    }
+  }
+}
+
 async function refreshSteamMetadataForAppIds(appIds, opts = {}) {
   const existingPause = getSteamMetadataPause();
   if (existingPause && !opts.ignorePause) {
+    steamMetadataState.status = 'paused';
+    steamMetadataState.pause = existingPause;
     return { checked: 0, updated: 0, skipped: 0, failed: 0, paused: true, pause: existingPause };
   }
 
@@ -657,6 +712,21 @@ async function refreshSteamMetadataForAppIds(appIds, opts = {}) {
     return now - row.steam_metadata_last_synced_at > STEAM_METADATA_TTL_MS;
   });
   if (!candidates.length) return { checked: ids.length, updated: 0, skipped: ids.length, failed: 0 };
+
+  // Initialise or extend the live status tracker.
+  if (steamMetadataState.status !== 'running') {
+    steamMetadataState.status = 'running';
+    steamMetadataState.total = candidates.length;
+    steamMetadataState.checked = 0;
+    steamMetadataState.updated = 0;
+    steamMetadataState.failed = 0;
+    steamMetadataState.rate_limited = 0;
+    steamMetadataState.started_at = Date.now();
+    steamMetadataState.finished_at = null;
+    steamMetadataState.pause = null;
+  } else {
+    steamMetadataState.total += candidates.length;
+  }
 
   const update = db.prepare(`UPDATE games
     SET genres_json = ?, categories_json = ?, steam_metadata_last_synced_at = ?
@@ -680,12 +750,15 @@ async function refreshSteamMetadataForAppIds(appIds, opts = {}) {
       if (!res.ok) {
         if (res.status === 429) {
           rateLimited++;
+          steamMetadataState.rate_limited++;
           logger.warn('Steam metadata refresh paused by rate limit', { app_id: appId, checked: i + 1, remaining: candidates.length - i - 1 });
           await new Promise(r => setTimeout(r, 5000));
           failed++;
+          steamMetadataState.failed++;
         } else if (res.status === 403) {
           forbidden++;
           failed++;
+          steamMetadataState.failed++;
           const pause = pauseSteamMetadata('Steam Store returned 403 Forbidden', {
             app_id: appId,
             status: 403,
@@ -694,20 +767,27 @@ async function refreshSteamMetadataForAppIds(appIds, opts = {}) {
           });
           logger.warn('Steam metadata request forbidden; paused metadata refresh', { app_id: appId, checked: i + 1, remaining: candidates.length - i - 1, paused_at: pause.paused_at });
           failed += candidates.length - i - 1;
+          steamMetadataState.failed += candidates.length - i - 1;
+          steamMetadataState.status = 'paused';
+          steamMetadataState.pause = pause;
+          steamMetadataState.checked = i + 1;
           break;
         } else {
           failed++;
+          steamMetadataState.failed++;
           logger.warn('Steam metadata request failed', { app_id: appId, status: res.status });
         }
       } else {
         const data = await res.json();
-        if (saveEntry(appId, data?.[String(appId)])) updated++;
-        else failed++;
+        if (saveEntry(appId, data?.[String(appId)])) { updated++; steamMetadataState.updated++; }
+        else { failed++; steamMetadataState.failed++; }
       }
     } catch (err) {
       failed++;
+      steamMetadataState.failed++;
       logger.warn('Steam metadata refresh failed', { app_id: appId, error: err.message });
     }
+    steamMetadataState.checked++;
     if ((i + 1) % 25 === 0) logger.info('Steam metadata refresh progress', { checked: i + 1, total: candidates.length, updated, failed, rate_limited: rateLimited, forbidden });
     if (i + 1 < candidates.length) await new Promise(r => setTimeout(r, 900));
   }
@@ -876,22 +956,18 @@ async function syncSteamAccount(accountId, opts = {}) {
   });
   txn();
 
-  let metadata = { checked: 0, updated: 0, skipped: 0, failed: 0 };
-  try {
-    metadata = await refreshSteamMetadataForAppIds(games.map(g => g.appid), { force: !!opts.refreshMetadata });
-  } catch (err) {
-    metadata.failed = games.length;
-    logger.warn('Steam metadata refresh did not complete', { user_id: userId, account_id: accountId, error: err.message });
-  }
+  // Queue Steam Store metadata refresh in the background so the sync request
+  // returns immediately. Progress is exposed via /api/steam-metadata/status.
+  queueSteamMetadataRefresh(games.map(g => g.appid), { force: !!opts.refreshMetadata });
 
   const elapsed = Date.now() - startedAt;
-  logger.info('Sync complete', { user_id: userId, account_id: accountId, label: accountLabel, added, updated, skipped, total: games.length, ms: elapsed, baselines_set: baselinesSet, baselines_bumped: baselinesBumped, baselines_restored: restoredBaselines, metadata });
+  logger.info('Sync complete', { user_id: userId, account_id: accountId, label: accountLabel, added, updated, skipped, total: games.length, ms: elapsed, baselines_set: baselinesSet, baselines_bumped: baselinesBumped, baselines_restored: restoredBaselines, metadata_queued: games.length });
   setImmediate(() => {
     if (app && app.locals && app.locals.broadcastLeaderboardUpdate) {
       app.locals.broadcastLeaderboardUpdate(userId, 'sync');
     }
   });
-  return { ok: true, added, updated, skipped, total: games.length, elapsed_ms: elapsed, account_label: accountLabel, metadata };
+  return { ok: true, added, updated, skipped, total: games.length, elapsed_ms: elapsed, account_label: accountLabel, metadata: { queued: games.length } };
 }
 
 // Sync ALL of a user's linked Steam accounts. Returns aggregate result.
@@ -901,7 +977,7 @@ async function syncUserLibrary(userId, opts = {}) {
 
   const results = [];
   let totalAdded = 0, totalUpdated = 0, totalSkipped = 0;
-  const metadata = { checked: 0, updated: 0, skipped: 0, failed: 0 };
+  const metadata = { queued: 0 };
   for (const acc of accounts) {
     const result = await syncSteamAccount(acc.id, opts);
     results.push({ account_id: acc.id, label: acc.label || 'Account', ...result });
@@ -909,7 +985,7 @@ async function syncUserLibrary(userId, opts = {}) {
       totalAdded += result.added || 0;
       totalUpdated += result.updated || 0;
       totalSkipped += result.skipped || 0;
-      for (const key of Object.keys(metadata)) metadata[key] += result.metadata?.[key] || 0;
+      metadata.queued += result.metadata?.queued || 0;
     }
     // Be polite to Steam API between accounts
     if (accounts.length > 1) await new Promise(r => setTimeout(r, 500));
@@ -942,8 +1018,12 @@ app.get('/api/setup/status', (req, res) => {
   // the wizard pre-fills (the configured port, or the default). The wizard uses both
   // so it can warn the user "we're temporarily on X — pick a permanent port below".
   const cfg = loadConfig();
+  let users = 0;
+  try { users = db.prepare('SELECT COUNT(*) AS c FROM users').get().c; } catch {}
   res.json({
     configured: isSetupComplete(),
+    has_users: users > 0,
+    user_count: users,
     current_port: ACTIVE_PORT || PORT,
     default_port: DEFAULT_PORT,
     suggested_port: cfg.port || DEFAULT_PORT,
@@ -960,36 +1040,18 @@ app.post('/api/setup/test-discord', async (req, res) => {
   if (!discord_bot_token || !discord_channel_id) return res.json({ ok:false, error:'Bot token and channel ID required' });
   res.json(await testDiscord(discord_bot_token, discord_channel_id, !!send_message));
 });
-// Resolve & validate a Steam profile during the wizard (before the API key is persisted).
-// Unguarded by requireSetup because it is part of the first-run flow.
-app.post('/api/setup/test-profile', async (req, res) => {
-  const { steam_api_key, steam_input } = req.body || {};
-  if (!steam_api_key) return res.json({ ok: false, error: 'Steam API key required' });
-  if (!steam_input) return res.json({ ok: false, error: 'Steam profile URL or SteamID64 required' });
-  // resolveSteamId reads the key from app_config; for the wizard we may not have saved it yet,
-  // so we briefly stash it and restore the prior value (if any) afterwards.
-  const prior = getConfig('steam_api_key');
-  setConfig('steam_api_key', steam_api_key);
-  try {
-    const result = await resolveSteamId(steam_input);
-    res.json(result);
-  } finally {
-    if (prior == null) deleteConfig('steam_api_key');
-    else setConfig('steam_api_key', prior);
-  }
-});
-
-// First-run wizard completion.
-// New multi-step payload — see public/setup.html. Legacy single-page fields
-// (discord_bot_token, discord_channel_id, itad_api_key, group_name) remain accepted but optional
-// so they can be configured later via a future Settings page without blocking initial setup.
+// First-run wizard — Part 1 (server setup) completion.
+// Profile creation moved to Part 2 (/first-profile) so we can guide the user
+// through Steam linking, library sync, and purchase-history imports properly.
+// Legacy single-page fields (discord_bot_token, discord_channel_id, itad_api_key, group_name)
+// remain accepted but optional, for a future Settings page.
 app.post('/api/setup/complete', async (req, res) => {
   if (isSetupComplete()) return res.status(403).json({ error: 'Setup already complete' });
   const body = req.body || {};
   const {
     steam_api_key, admin_password,
     hosting_mode, port,
-    first_user, first_profile, defaults,
+    defaults,
     // legacy / optional
     group_name, discord_bot_token, discord_channel_id, itad_api_key
   } = body;
@@ -997,8 +1059,6 @@ app.post('/api/setup/complete', async (req, res) => {
   if (!steam_api_key) return res.status(400).json({ error: 'Steam API key is required' });
   if (!admin_password) return res.status(400).json({ error: 'Admin password is required' });
   if (admin_password.length < 6) return res.status(400).json({ error: 'Admin password must be at least 6 characters' });
-  if (!first_user?.display_name?.trim()) return res.status(400).json({ error: 'A display name for the first user is required' });
-  if (!first_profile?.steam_input?.trim()) return res.status(400).json({ error: 'A Steam profile URL or SteamID64 is required' });
 
   // Validate the port if supplied. Ports below 1024 require admin/root on most OSes,
   // and 0/negative/>65535 aren't valid TCP ports — reject them with a friendly message.
@@ -1028,24 +1088,11 @@ app.post('/api/setup/complete', async (req, res) => {
 
   const mode = hosting_mode === 'internet' ? 'internet' : 'local';
 
-  // Persist the Steam key first so resolveSteamId() can use it.
-  setConfig('steam_api_key', steam_api_key);
-
-  const resolved = await resolveSteamId(first_profile.steam_input);
-  if (!resolved.ok) {
-    // Roll back the key we just stored so an aborted wizard run doesn't leave half-state behind.
-    deleteConfig('steam_api_key');
-    return res.status(400).json({
-      error: 'Could not look up that Steam profile: ' + resolved.error,
-      hint: 'Possible causes: invalid profile URL or SteamID64, a private Steam profile, an invalid Steam API key, or Steam being temporarily unavailable.'
-    });
-  }
-
   try {
-    let newUserId;
     db.transaction(() => {
-      // Persist core settings
+      // Persist core server settings.
       setConfig('group_name', (group_name || 'The Backlog Ledger').toString().trim() || 'The Backlog Ledger');
+      setConfig('steam_api_key', steam_api_key);
       setConfig('admin_password_hash', hashPassword(admin_password));
       setConfig('hosting_mode', mode);
       // Defaults — persisted now for a future Settings page. The current ledger logic
@@ -1056,27 +1103,13 @@ app.post('/api/setup/complete', async (req, res) => {
       if (defaults?.min_played_hours != null && Number.isFinite(Number(defaults.min_played_hours))) {
         setConfig('min_played_hours', String(Number(defaults.min_played_hours)));
       }
-      // Optional legacy keys
+      // Optional legacy keys (a future Settings page can flesh these out).
       if (discord_bot_token) setConfig('discord_bot_token', discord_bot_token);
       if (discord_channel_id) setConfig('discord_channel_id', discord_channel_id);
       if (itad_api_key) setConfig('itad_api_key', itad_api_key);
 
-      // Create the first user + primary Steam account row.
-      const displayName = first_user.display_name.trim();
-      const avatarUrl = (first_user.avatar_url || resolved.avatar_url || null);
-      const info = db.prepare(`INSERT INTO users (display_name, steam_id, discord_user_id, avatar_url, created_at)
-        VALUES (?, ?, NULL, ?, ?)`).run(displayName, resolved.steam_id, avatarUrl, Date.now());
-      newUserId = info.lastInsertRowid;
-      const label = (first_profile.label || 'Main').toString().trim() || 'Main';
-      db.prepare(`INSERT INTO user_steam_accounts (user_id, steam_id, label, persona_name, avatar_url, added_at)
-        VALUES (?, ?, ?, ?, ?, ?)`).run(newUserId, resolved.steam_id, label,
-        resolved.persona_name || displayName, resolved.avatar_url || null, Date.now());
-
-      // Mark this user as the owner. There is no admin column yet — this lets a future
-      // Settings/permissions page recognise the original owner.
-      setConfig('owner_user_id', String(newUserId));
-
       // Flip the first-run flag last so a crash mid-transaction leaves the wizard re-runnable.
+      // The owner_user_id is set later when Part 2 creates the first profile.
       setConfig('setup_completed_at', String(Date.now()));
     })();
     // Persist the chosen port to config.json so future starts pick it up.
@@ -1088,16 +1121,15 @@ app.post('/api/setup/complete', async (req, res) => {
       } catch (err) {
         logger.error('Failed to persist port to config.json', { error: err.message });
         return res.json({
-          ok: true, owner_user_id: newUserId, steam_id: resolved.steam_id,
-          port_save_error: 'Setup finished, but we could not save the port to config.json: ' + err.message,
+          ok: true,
+          port_save_error: 'Server is set up, but we could not save the port to config.json: ' + err.message,
           current_port: ACTIVE_PORT,
         });
       }
     }
 
-    logger.info('Setup completed via wizard', {
-      owner_user_id: newUserId, hosting_mode: mode,
-      port: chosenPort, port_will_swap: portWillSwap,
+    logger.info('Server setup completed (Part 1)', {
+      hosting_mode: mode, port: chosenPort, port_will_swap: portWillSwap,
     });
 
     // Respond first, THEN swap the listener — so this very response makes it back to
@@ -1105,11 +1137,10 @@ app.post('/api/setup/complete', async (req, res) => {
     // chosen_port to redirect itself to the new URL after a short delay.
     res.json({
       ok: true,
-      owner_user_id: newUserId,
-      steam_id: resolved.steam_id,
       current_port: ACTIVE_PORT,
       chosen_port: chosenPort,
       port_will_swap: portWillSwap,
+      next: '/first-profile',
     });
 
     if (portWillSwap) {
@@ -1184,6 +1215,10 @@ app.post('/api/users', requireSetup, async (req, res) => {
       db.prepare(`INSERT INTO user_steam_accounts (user_id, steam_id, label, persona_name, avatar_url, added_at)
         VALUES (?, ?, ?, ?, ?, ?)`).run(newId, resolved.steam_id, 'Main', resolved.persona_name || display_name.trim(),
         resolved.avatar_url || null, Date.now());
+      // If no owner has been recorded yet (i.e. this is the first profile created
+      // after Part 1 setup), claim ownership for this user. A future permissions
+      // page can read owner_user_id without us having to backfill anything.
+      if (!getConfig('owner_user_id')) setConfig('owner_user_id', String(newId));
     })();
     logger.info('Profile created', { id: newId, name: display_name });
     res.json({ ok: true, id: newId, steam_id: resolved.steam_id, avatar_url: resolved.avatar_url });
@@ -2681,6 +2716,27 @@ app.post('/api/admin/steam-metadata/resume', requireAdmin, (req, res) => {
   logger.info('Steam metadata refresh resumed by admin');
   res.json({ ok: true, paused: false });
 });
+
+// Public status endpoint for the help-button indicator.
+app.get('/api/steam-metadata/status', (req, res) => {
+  const pause = getSteamMetadataPause();
+  const queued = steamMetadataQueue.size;
+  let status = steamMetadataState.status;
+  if (pause) status = 'paused';
+  else if (status === 'idle' && queued > 0) status = 'running';
+  res.json({
+    status,
+    total: steamMetadataState.total,
+    checked: steamMetadataState.checked,
+    updated: steamMetadataState.updated,
+    failed: steamMetadataState.failed,
+    rate_limited: steamMetadataState.rate_limited,
+    queued,
+    started_at: steamMetadataState.started_at,
+    finished_at: steamMetadataState.finished_at,
+    pause: pause || steamMetadataState.pause || null,
+  });
+});
 app.get('/api/debug/logs', requireAdmin, (req, res) => {
   const file = path.join(LOGS_DIR, `app-${todayStamp()}.log`);
   if (!fs.existsSync(file)) return res.json({ lines: [] });
@@ -2693,15 +2749,25 @@ app.get('/api/debug/errors', requireAdmin, (req, res) => {
 });
 
 // ---------- Guards + static ----------
-// First-run guard:
-//  - When setup_completed_at is NOT set, every page request is redirected to the setup wizard
-//    EXCEPT the wizard itself (so we don't loop) and the setup API endpoints.
-//  - Static assets (css/js/images) are always allowed so the wizard can style itself.
-//  - Once setup is complete, "/" serves the normal profiles dashboard as before.
+// First-run guard (two phases):
+//   Part 1 — setup_completed_at NOT set:
+//     every page request goes to /setup, except /setup itself and /api/setup/*.
+//   Part 2 — setup_completed_at set but ZERO users exist:
+//     every page request goes to /first-profile, except /first-profile itself,
+//     /api/users (for creation), and shared static assets.
+//   Steady state — setup done + at least one user:
+//     normal app, "/" serves profiles.html.
 const SETUP_PATHS = new Set(['/setup', '/setup.html']);
+const FIRST_PROFILE_PATHS = new Set(['/first-profile', '/first-profile.html']);
 const ALWAYS_ALLOWED_PREFIXES = ['/api/setup/', '/health', '/style.css', '/js/', '/favicon'];
+// Endpoints Part 2 actually needs in order to create the first user.
+const PART2_ALLOWED_PREFIXES = ['/api/users', '/api/group', '/api/setup/'];
 function isStaticAsset(p) {
   return /\.(css|js|png|jpg|jpeg|svg|gif|webp|ico|woff2?|ttf|map)$/i.test(p);
+}
+function userCount() {
+  try { return db.prepare('SELECT COUNT(*) AS c FROM users').get().c; }
+  catch { return 0; }
 }
 app.use((req, res, next) => {
   const p = req.path;
@@ -2710,12 +2776,23 @@ app.use((req, res, next) => {
     if (p === '/') return res.redirect(302, '/setup');
     if (ALWAYS_ALLOWED_PREFIXES.some(pref => p.startsWith(pref))) return next();
     if (isStaticAsset(p)) return next();
-    // Any other HTML/API request before setup is finished — bounce to wizard.
     if (req.accepts(['html', 'json']) === 'html') return res.redirect(302, '/setup');
     return res.status(403).json({ error: 'Setup not complete', redirect: '/setup' });
   }
+  // Setup is complete — Part 2 still required while no users exist.
+  if (userCount() === 0) {
+    if (FIRST_PROFILE_PATHS.has(p)) return res.sendFile(path.join(PUBLIC_DIR, 'first-profile.html'));
+    if (SETUP_PATHS.has(p)) return res.sendFile(path.join(PUBLIC_DIR, 'setup.html'));
+    if (p === '/') return res.redirect(302, '/first-profile');
+    if (PART2_ALLOWED_PREFIXES.some(pref => p.startsWith(pref))) return next();
+    if (ALWAYS_ALLOWED_PREFIXES.some(pref => p.startsWith(pref))) return next();
+    if (isStaticAsset(p)) return next();
+    if (req.accepts(['html', 'json']) === 'html') return res.redirect(302, '/first-profile');
+    return res.status(403).json({ error: 'First profile not yet created', redirect: '/first-profile' });
+  }
   if (p === '/') return res.sendFile(path.join(PUBLIC_DIR, 'profiles.html'));
   if (SETUP_PATHS.has(p)) return res.sendFile(path.join(PUBLIC_DIR, 'setup.html'));
+  if (FIRST_PROFILE_PATHS.has(p)) return res.sendFile(path.join(PUBLIC_DIR, 'first-profile.html'));
   next();
 });
 app.use(express.static(PUBLIC_DIR));

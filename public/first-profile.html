@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Profile setup — The Backlog Ledger</title>
+  <link rel="stylesheet" href="/style.css" />
+  <style>
+    /* Mirrors setup.html's wizard chrome so Part 1 → Part 2 feels seamless. */
+    .wizard-shell { max-width: 760px; }
+    .wizard-progress {
+      display: flex;
+      gap: 6px;
+      margin: 24px 0 28px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--ink-faint);
+      flex-wrap: wrap;
+    }
+    .wizard-progress .step {
+      padding: 6px 10px;
+      border: 1px solid var(--rule);
+      opacity: 0.55;
+    }
+    .wizard-progress .step.active { color: var(--gold); border-color: var(--gold); opacity: 1; }
+    .wizard-progress .step.done { color: var(--paid); border-color: var(--paid); opacity: 0.85; }
+
+    .step-panel { display: none; }
+    .step-panel.active { display: block; }
+
+    .step-title {
+      font-family: 'Fraunces', serif;
+      font-weight: 400;
+      font-size: 28px;
+      letter-spacing: -0.01em;
+      color: var(--ink);
+      margin-bottom: 8px;
+    }
+    .step-lede {
+      font-family: 'Fraunces', serif;
+      font-style: italic;
+      color: var(--ink-dim);
+      margin-bottom: 20px;
+    }
+    .step-body p { margin-bottom: 12px; color: var(--ink-dim); }
+
+    .wizard-nav {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-top: 24px;
+      padding-top: 18px;
+      border-top: 1px solid var(--rule);
+      flex-wrap: wrap;
+    }
+    .wizard-nav .right { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+    .profile-preview {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 12px 14px;
+      border: 1px solid var(--rule-strong);
+      background: var(--bg);
+      margin-top: 12px;
+    }
+    .profile-preview img {
+      width: 56px;
+      height: 56px;
+      object-fit: cover;
+      border: 1px solid var(--rule);
+      background: var(--bg-3);
+    }
+    .profile-preview .pp-info strong {
+      display: block;
+      color: var(--ink);
+      font-size: 15px;
+    }
+    .profile-preview .pp-info small {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--ink-faint);
+    }
+
+    .sync-summary {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      color: var(--ink-dim);
+      margin-top: 12px;
+      padding: 10px 12px;
+      border: 1px dashed var(--rule-strong);
+    }
+    .sync-summary .num { color: var(--gold); }
+  </style>
+</head>
+<body>
+  <main class="container wizard-shell">
+
+    <header style="border-bottom: 1px solid var(--rule); padding-bottom: 16px; margin-bottom: 8px;">
+      <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--ink-faint);">First profile setup &mdash; part 2 of 2</div>
+      <h1 style="font-family: 'Fraunces', serif; font-weight: 400; font-size: clamp(28px, 4vw, 42px); color: var(--ink); margin-top: 6px;">The Backlog Ledger</h1>
+    </header>
+
+    <nav class="wizard-progress" id="progress" aria-label="Profile setup progress"></nav>
+
+    <form id="profile-form" class="card" onsubmit="return false;">
+
+      <!-- =========================================================
+           Step 1 — Welcome to Part 2
+           ========================================================= -->
+      <section class="step-panel" data-step="1">
+        <h2 class="step-title">Now to make your first profile</h2>
+        <p class="step-lede">A profile is one person on the ledger &mdash; a Steam library plus a name.</p>
+        <div class="step-body">
+          <p>The server is set up &mdash; now we'll create your own profile and pull in your Steam library.
+            You'll be the owner of this ledger.</p>
+          <p>Other people can add their own profiles later from the dashboard.</p>
+        </div>
+        <div class="wizard-nav">
+          <span></span>
+          <div class="right">
+            <button type="button" class="btn-primary" data-next>Begin</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- =========================================================
+           Step 2 — Profile basics (name, optional discord)
+           ========================================================= -->
+      <section class="step-panel" data-step="2">
+        <h2 class="step-title">Your name on the ledger</h2>
+        <p class="step-lede">How you'll appear on the leaderboard and in Discord posts.</p>
+        <div class="step-body">
+          <div class="field">
+            <label for="display_name">Display name <span class="req">*</span></label>
+            <input id="display_name" type="text" placeholder="e.g. Alex" required />
+            <small>This is just your label on the ledger &mdash; doesn't have to match your Steam name.</small>
+          </div>
+          <div class="field">
+            <label for="discord_user_id">Discord username or ID (optional)</label>
+            <input id="discord_user_id" type="text" placeholder="optional — used for @mentions in the weekly digest" />
+            <small>Used to @-mention you in the weekly Discord digest once a Discord bot is configured.
+              You can skip this and add it later.</small>
+          </div>
+        </div>
+        <div class="wizard-nav">
+          <button type="button" class="btn-test" data-back>Back</button>
+          <div class="right"><button type="button" class="btn-primary" data-next>Continue</button></div>
+        </div>
+      </section>
+
+      <!-- =========================================================
+           Step 3 — Steam profile lookup
+           ========================================================= -->
+      <section class="step-panel" data-step="3">
+        <h2 class="step-title">Link your Steam account</h2>
+        <p class="step-lede">We'll use this to read your library &mdash; nothing else.</p>
+        <div class="step-body">
+          <div class="field">
+            <label for="steam_input">Steam profile URL or SteamID64 <span class="req">*</span></label>
+            <input id="steam_input" type="text" placeholder="https://steamcommunity.com/id/yourname  or  76561198…" autocomplete="off" required />
+            <small>Paste your full profile URL, your vanity name, or your 17-digit SteamID64. Any of those work.</small>
+            <div class="test-row">
+              <button type="button" class="btn-test" id="btn-lookup">Look up profile</button>
+              <span id="lookup-result" class="test-result"></span>
+            </div>
+          </div>
+          <div id="profile-preview-wrap" style="display:none;">
+            <div class="profile-preview">
+              <img id="pp-avatar" alt="" />
+              <div class="pp-info">
+                <strong id="pp-name"></strong>
+                <small id="pp-steamid"></small>
+              </div>
+            </div>
+          </div>
+          <p class="muted small" id="lookup-help" style="display:none; margin-top: 10px;">
+            Couldn't find the profile? Common causes:
+            invalid profile URL or SteamID64, a private Steam profile (game details hidden),
+            an invalid Steam API key, or Steam being temporarily unavailable.
+          </p>
+        </div>
+        <div class="wizard-nav">
+          <button type="button" class="btn-test" data-back>Back</button>
+          <div class="right">
+            <button type="button" class="btn-primary" id="btn-create">Create profile</button>
+            <span id="create-result" class="test-result"></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- =========================================================
+           Step 4 — Initial library sync
+           ========================================================= -->
+      <section class="step-panel" data-step="4">
+        <h2 class="step-title">Pull in your Steam library</h2>
+        <p class="step-lede">One sync now &mdash; the ledger will auto-sync every Wednesday after that.</p>
+        <div class="step-body">
+          <p>We'll fetch every game on your linked Steam account and add it to the ledger.
+            This usually takes a few seconds, but a very large library can take a minute.</p>
+          <p class="muted small">If your Steam profile or game details are private, the sync will fail.
+            You can keep your profile public for the sync and switch it back after &mdash; the ledger
+            only re-syncs once a week.</p>
+          <div class="actions">
+            <button type="button" class="btn-primary" id="btn-sync">Sync my library now</button>
+            <button type="button" class="btn-test" id="btn-skip-sync">Skip for now</button>
+            <span id="sync-result" class="test-result"></span>
+          </div>
+          <div id="sync-summary" class="sync-summary" style="display:none;"></div>
+        </div>
+        <div class="wizard-nav">
+          <button type="button" class="btn-test" data-back>Back</button>
+          <div class="right"><button type="button" class="btn-primary" data-next id="btn-sync-next" disabled>Continue</button></div>
+        </div>
+      </section>
+
+      <!-- =========================================================
+           Step 5 — Import purchase history (optional)
+           ========================================================= -->
+      <section class="step-panel" data-step="5">
+        <h2 class="step-title">Import purchase history (optional)</h2>
+        <p class="step-lede">So the ledger knows what you actually paid.</p>
+        <div class="step-body">
+          <p>The ledger can estimate prices from the Steam store, but real <strong>purchase history</strong>
+            is far more accurate &mdash; it knows exactly what you paid (including sales) and which games
+            were gifts or freebies.</p>
+          <p>You can do this now in a dedicated import page, or skip it and import later from your profile tools.</p>
+          <div class="actions">
+            <button type="button" class="btn-primary" id="btn-go-import">Open import page</button>
+            <button type="button" class="btn-test" data-next>Skip for now</button>
+          </div>
+          <p class="muted small" style="margin-top: 14px;">
+            <strong>Tip:</strong> you can always reach the importer from your profile menu later.
+          </p>
+        </div>
+        <div class="wizard-nav">
+          <button type="button" class="btn-test" data-back>Back</button>
+          <div class="right"><button type="button" class="btn-primary" data-next>Continue</button></div>
+        </div>
+      </section>
+
+      <!-- =========================================================
+           Step 6 — Finish
+           ========================================================= -->
+      <section class="step-panel" data-step="6">
+        <h2 class="step-title">You're in</h2>
+        <p class="step-lede">The ledger is set up and your profile is ready.</p>
+        <div class="step-body">
+          <p>Everything's saved. From here you can browse your library, see the leaderboard,
+            and (when you're ready) invite friends to add their own profiles.</p>
+          <p class="muted small">Need to import a purchase history later? Open your profile menu and look for <em>Import ledger records</em>.</p>
+        </div>
+        <div class="wizard-nav">
+          <span></span>
+          <div class="right">
+            <button type="button" class="btn-primary" id="btn-open-ledger">Open the ledger</button>
+          </div>
+        </div>
+      </section>
+
+    </form>
+  </main>
+
+  <script>
+    // ---------- Wizard state ----------
+    const STEP_TITLES = ['Welcome', 'Name', 'Steam', 'Library Sync', 'Imports', 'Done'];
+    const TOTAL = STEP_TITLES.length;
+    const state = {
+      display_name: '',
+      discord_user_id: '',
+      steam_input: '',
+      lookup_ok: false,
+      created_user_id: null,
+      synced: false,
+    };
+    let currentStep = 1;
+
+    const $ = (id) => document.getElementById(id);
+    function val(id) { const el = $(id); return el ? el.value.trim() : ''; }
+    function showResult(id, ok, msg) {
+      const el = $(id);
+      if (!el) return;
+      el.textContent = msg;
+      el.className = 'test-result ' + (ok ? 'ok' : 'err');
+    }
+
+    function renderProgress() {
+      const nav = $('progress');
+      nav.innerHTML = '';
+      STEP_TITLES.forEach((title, i) => {
+        const stepNum = i + 1;
+        const div = document.createElement('div');
+        div.className = 'step' + (stepNum === currentStep ? ' active' : (stepNum < currentStep ? ' done' : ''));
+        div.textContent = stepNum + '. ' + title;
+        nav.appendChild(div);
+      });
+    }
+
+    function showStep(n) {
+      currentStep = n;
+      document.querySelectorAll('.step-panel').forEach(p => {
+        p.classList.toggle('active', Number(p.dataset.step) === n);
+      });
+      renderProgress();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    // Per-step gate. Returning a string blocks advance and shows the message.
+    const validators = {
+      1: () => null,
+      2: () => {
+        const name = val('display_name');
+        if (!name) return 'Please enter a display name.';
+        state.display_name = name;
+        state.discord_user_id = val('discord_user_id');
+        return null;
+      },
+      3: () => {
+        // Advancing past step 3 requires a successfully-created user. Block until that.
+        if (!state.created_user_id) {
+          return 'Please look up your Steam profile and click "Create profile" first.';
+        }
+        return null;
+      },
+      4: () => null,
+      5: () => null,
+      6: () => null,
+    };
+
+    function goNext() {
+      const err = validators[currentStep]?.();
+      if (err) { alert(err); return; }
+      if (currentStep < TOTAL) showStep(currentStep + 1);
+    }
+    function goBack() {
+      if (currentStep > 1) showStep(currentStep - 1);
+    }
+
+    document.querySelectorAll('[data-next]').forEach(b => b.addEventListener('click', goNext));
+    document.querySelectorAll('[data-back]').forEach(b => b.addEventListener('click', goBack));
+
+    // ---------- Step 3 — Steam profile lookup ----------
+    // Uses the same /api/users/resolve-steam endpoint the dashboard uses, so we don't
+    // have a parallel codepath that can drift from how the rest of the app handles Steam IDs.
+    $('btn-lookup').addEventListener('click', async () => {
+      const input = val('steam_input');
+      if (!input) return showResult('lookup-result', false, '✗ Enter a Steam profile URL or SteamID64');
+      showResult('lookup-result', true, 'Looking up…');
+      $('lookup-help').style.display = 'none';
+      $('profile-preview-wrap').style.display = 'none';
+      try {
+        const res = await fetch('/api/users/resolve-steam', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ steam_input: input })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          state.lookup_ok = true;
+          state.steam_input = input;
+          showResult('lookup-result', true, '✓ Found ' + (data.persona_name || data.steam_id));
+          if (data.avatar_url) { $('pp-avatar').src = data.avatar_url; $('pp-avatar').style.display = ''; }
+          else $('pp-avatar').style.display = 'none';
+          $('pp-name').textContent = data.persona_name || '(no Steam name)';
+          $('pp-steamid').textContent = data.steam_id;
+          $('profile-preview-wrap').style.display = '';
+        } else {
+          state.lookup_ok = false;
+          showResult('lookup-result', false, '✗ ' + (data.error || 'Lookup failed'));
+          $('lookup-help').style.display = 'block';
+        }
+      } catch (err) {
+        showResult('lookup-result', false, '✗ ' + err.message);
+        $('lookup-help').style.display = 'block';
+      }
+    });
+
+    // ---------- Step 3 — Create the profile ----------
+    $('btn-create').addEventListener('click', async () => {
+      const name = val('display_name');
+      const input = val('steam_input');
+      if (!name) { showStep(2); return alert('Please enter a display name first.'); }
+      if (!input) return showResult('create-result', false, '✗ Enter a Steam profile URL or SteamID64');
+      showResult('create-result', true, 'Creating profile…');
+      try {
+        const res = await fetch('/api/users', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            display_name: name,
+            steam_input: input,
+            discord_user_id: state.discord_user_id || null,
+          })
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          state.created_user_id = data.id;
+          // Remember the profile selection client-side, the same way profiles.html does it,
+          // so when the user lands back at "/" the dashboard already knows who they are.
+          try {
+            localStorage.setItem('bl_profile_id', String(data.id));
+            localStorage.setItem('bl_profile_name', name);
+          } catch {}
+          showResult('create-result', true, '✓ Profile created');
+          setTimeout(() => showStep(4), 600);
+        } else {
+          showResult('create-result', false, '✗ ' + (data.error || 'Create failed'));
+        }
+      } catch (err) {
+        showResult('create-result', false, '✗ ' + err.message);
+      }
+    });
+
+    // ---------- Step 4 — Initial library sync ----------
+    $('btn-sync').addEventListener('click', async () => {
+      if (!state.created_user_id) {
+        showResult('sync-result', false, '✗ Create the profile first');
+        return;
+      }
+      showResult('sync-result', true, 'Syncing… (this can take a moment)');
+      $('btn-sync').disabled = true;
+      try {
+        const res = await fetch(`/api/users/${state.created_user_id}/sync`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          state.synced = true;
+          showResult('sync-result', true, '✓ Library synced');
+          const added = data.games_added ?? 0;
+          const updated = data.games_updated ?? 0;
+          $('sync-summary').style.display = 'block';
+          $('sync-summary').innerHTML =
+            `<span class="num">${added}</span> games added, <span class="num">${updated}</span> updated.`;
+          $('btn-sync-next').disabled = false;
+        } else {
+          showResult('sync-result', false, '✗ ' + (data.error || 'Sync failed'));
+          $('btn-sync').disabled = false;
+        }
+      } catch (err) {
+        showResult('sync-result', false, '✗ ' + err.message);
+        $('btn-sync').disabled = false;
+      }
+    });
+
+    $('btn-skip-sync').addEventListener('click', () => {
+      // User explicitly chose to skip — allow Continue.
+      $('btn-sync-next').disabled = false;
+      showResult('sync-result', true, 'Skipped. You can sync from the dashboard later.');
+    });
+
+    // ---------- Step 5 — Hand off to import page ----------
+    $('btn-go-import').addEventListener('click', () => {
+      // The importer expects a profile to be selected; we already set localStorage above.
+      // After importing, the user can navigate back via the topbar — they won't be forced
+      // back into the wizard because Part 2's guard releases once a user exists.
+      window.location.href = '/import.html';
+    });
+
+    // ---------- Step 6 — Done ----------
+    $('btn-open-ledger').addEventListener('click', () => {
+      window.location.href = '/';
+    });
+
+    // ---------- Init ----------
+    // If a user already exists by the time the wizard loads, the user is in the wrong place —
+    // bounce them to the dashboard. This stops people from re-running Part 2 from URL.
+    (async () => {
+      try {
+        const res = await fetch('/api/setup/status');
+        const data = await res.json();
+        if (data?.has_users) {
+          window.location.replace('/');
+          return;
+        }
+      } catch { /* not fatal — let the user proceed */ }
+      showStep(1);
+    })();
+  </script>
+</body>
+</html>
