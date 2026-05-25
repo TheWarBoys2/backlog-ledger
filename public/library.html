@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Library — The Backlog Ledger</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="container topbar-inner">
+      <strong>The Backlog Ledger</strong>
+      <div class="topbar-right">
+        <a href="/index.html" class="link">← Back</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <h1>Your Library</h1>
+    <p class="subtitle" id="subtitle">Loading…</p>
+
+    <div class="card">
+      <div class="library-controls">
+        <input id="search" type="text" placeholder="Search games…" />
+        <select id="filter">
+          <option value="all">All games</option>
+          <option value="played">Played (>0 hrs)</option>
+          <option value="unplayed">Unplayed</option>
+        </select>
+      </div>
+      <div id="library-table">Loading…</div>
+    </div>
+  </main>
+
+  <script src="/js/app.js"></script>
+  <script>
+    const profile = BL.getProfile();
+    if (!profile) { window.location.href = '/profiles.html'; }
+
+    let allGames = [];
+
+    function render() {
+      const search = document.getElementById('search').value.toLowerCase();
+      const filter = document.getElementById('filter').value;
+      let filtered = allGames;
+      if (filter === 'played') filtered = filtered.filter(g => g.playtime_minutes > 0);
+      if (filter === 'unplayed') filtered = filtered.filter(g => g.playtime_minutes === 0);
+      if (search) filtered = filtered.filter(g => g.name.toLowerCase().includes(search));
+
+      const el = document.getElementById('library-table');
+      if (filtered.length === 0) {
+        el.innerHTML = '<p class="muted">No games match.</p>';
+        return;
+      }
+      el.innerHTML = '<table class="library"><thead><tr><th>Game</th><th>Hours</th><th>Last 2 weeks</th><th>Paid</th></tr></thead><tbody>'
+        + filtered.map(g => `<tr>
+            <td>${escapeHtml(g.name)}</td>
+            <td>${(g.playtime_minutes / 60).toFixed(1)}</td>
+            <td>${g.playtime_last_2weeks > 0 ? (g.playtime_last_2weeks / 60).toFixed(1) + ' h' : '—'}</td>
+            <td>${String(g.price_estimate_source || '').includes('Gift/Guest Pass') ? 'Gifted' : (g.paid_price_cents != null ? '£' + (g.paid_price_cents / 100).toFixed(2) : '—')}</td>
+          </tr>`).join('')
+        + '</tbody></table>';
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    async function init() {
+      try {
+        const r = await fetch(`/api/users/${profile.id}/games`);
+        const d = await r.json();
+        allGames = d.games || [];
+        document.getElementById('subtitle').textContent =
+          `${d.stats.total} games • ${d.stats.played} played • ${d.stats.unplayed} unplayed • ${d.stats.total_hours} total hours`;
+        render();
+      } catch (err) {
+        document.getElementById('library-table').textContent = 'Error: ' + err.message;
+      }
+    }
+
+    document.getElementById('search').addEventListener('input', render);
+    document.getElementById('filter').addEventListener('change', render);
+    init();
+  </script>
+</body>
+</html>

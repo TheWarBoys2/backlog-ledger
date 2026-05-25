@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Edit Profile — The Backlog Ledger</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="container topbar-inner">
+      <strong>The Backlog Ledger</strong>
+      <div class="topbar-right">
+        <a href="/index.html" class="link">← Back</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <h1>Edit profile</h1>
+
+    <section class="card">
+      <div class="field">
+        <label for="display_name">Display name</label>
+        <input id="display_name" type="text" />
+      </div>
+      <div class="field">
+        <label for="steam_input">Steam ID or vanity URL</label>
+        <input id="steam_input" type="text" />
+        <div class="test-row">
+          <button class="btn-test" onclick="testSteam()">Test Steam ID</button>
+          <span id="steam-result" class="test-result"></span>
+        </div>
+      </div>
+      <div class="field">
+        <label for="discord_user_id">Discord username or ID</label>
+        <input id="discord_user_id" type="text" placeholder="optional" />
+      </div>
+      <div class="actions">
+        <button class="btn-primary" onclick="save()">Save changes</button>
+        <span id="save-result" class="test-result"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Steam accounts</h2>
+      <p class="muted">Link multiple Steam accounts to this profile. Games owned on different accounts will be merged in your ledger, with badges showing which account each one came from. Import purchase history separately into each account.</p>
+      <div id="steam-accounts-list" class="muted">Loading accounts…</div>
+      <div class="actions" style="margin-top:1rem;">
+        <button class="btn-primary" type="button" onclick="toggleAddAccount()" id="btn-toggle-add-account">+ Add another Steam account</button>
+      </div>
+      <div id="add-account-form" style="display:none;margin-top:1rem;padding:1rem;background:rgba(255,255,255,0.04);border-radius:6px;">
+        <div class="field">
+          <label for="new_account_input">Steam ID or vanity URL</label>
+          <input id="new_account_input" type="text" placeholder="76561198... or vanity URL" />
+        </div>
+        <div class="field">
+          <label for="new_account_label">Account label</label>
+          <input id="new_account_label" type="text" placeholder="e.g. Alt, Family Sharing, Work" maxlength="50" />
+        </div>
+        <div class="actions">
+          <button class="btn-primary" type="button" onclick="addAccount()">Add account</button>
+          <button class="btn-test" type="button" onclick="toggleAddAccount()">Cancel</button>
+          <span id="add-account-result" class="test-result"></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card profile-tools-card" id="ledger-imports">
+      <h2>Ledger imports</h2>
+      <p class="muted">Keep your prices honest: purchase history sets what you paid, while the Steam licences import marks received gifts and complimentary/free promotions as free.</p>
+      <div class="profile-tool-grid">
+        <div class="profile-tool-box">
+          <h3>Ledger imports</h3>
+          <p class="muted">Paste Steam purchase history and Steam licences together, then review both in one shared matching flow.</p>
+          <a href="/import.html" class="btn-primary" style="display:inline-block;text-decoration:none;margin-top:0.5rem;">Import purchases & licences</a>
+        </div>
+        <div class="profile-tool-box">
+          <h3>Missing price estimates</h3>
+          <p class="muted">Fill in games that still have no price using the current lowest-price estimate flow. Gifted and complimentary/free licence games stay free, and Retail keys are still estimated.</p>
+          <div class="actions wrap-actions">
+            <button class="btn-primary" id="estimate-prices-btn" onclick="estimatePrices()">Estimate missing prices</button>
+            <span id="estimate-result" class="test-result"></span>
+          </div>
+        </div>
+        <div class="profile-tool-box">
+          <h3>Saved import matches</h3>
+          <p class="muted">Review or change remembered purchase/licence matches using the same review page as the import flow, without pasting the Steam exports again.</p>
+          <div class="actions wrap-actions">
+            <button class="btn-primary" id="manage-matches-btn" onclick="window.location.href='/import.html?manage=matches'">Edit saved matches</button>
+            <span id="matches-result" class="test-result"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Delete profile</h2>
+      <p class="muted">Requires admin password. This removes all game data for this profile and cannot be undone.</p>
+      <div class="field">
+        <input id="admin_pw" type="password" placeholder="Admin password" />
+      </div>
+      <button class="btn-danger" onclick="deleteProfile()">Delete this profile</button>
+      <span id="delete-result" class="test-result"></span>
+    </section>
+  </main>
+
+
+
+  <div id="match-manager-backdrop" style="display:none;">
+    <div id="match-manager-modal" class="modal wide-modal">
+      <h2>Edit saved import matches</h2>
+      <p class="muted small">These are the remembered choices from the combined import page. Clearing one does not change any prices already applied; it only forgets the choice for future imports.</p>
+      <div class="toolbar-row">
+        <input id="match-manager-search" type="text" placeholder="Search saved matches…" />
+        <select id="match-manager-kind">
+          <option value="all">All sources</option>
+          <option value="purchase">Purchase history</option>
+          <option value="license">Licences / gifts</option>
+        </select>
+        <button class="btn-test" id="match-manager-refresh" type="button">Refresh</button>
+      </div>
+      <div id="match-manager-list" class="import-preview"></div>
+      <div class="actions">
+        <button class="btn-test" id="match-manager-close" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="saved-match-backdrop" style="display:none;">
+    <div id="saved-match-modal" class="modal">
+      <h2>Choose a new match</h2>
+      <p class="muted" id="saved-match-raw"></p>
+      <input id="saved-match-search" type="text" placeholder="Search your library…" />
+      <div id="saved-match-results" class="mode-results"></div>
+      <div class="actions">
+        <button class="btn-test" id="saved-match-cancel" type="button">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+
+
+  <script src="/js/app.js"></script>
+  <script>
+    const profile = BL.getProfile();
+    if (!profile) { window.location.href = '/profiles.html'; }
+
+    function val(id) { return document.getElementById(id).value.trim(); }
+    function showResult(id, ok, msg) {
+      const el = document.getElementById(id);
+      el.textContent = msg;
+      el.className = 'test-result ' + (ok ? 'ok' : 'err');
+    }
+
+    async function load() {
+      try {
+        const r = await fetch(`/api/users/${profile.id}`);
+        if (!r.ok) { window.location.href = '/profiles.html'; return; }
+        const d = await r.json();
+        document.getElementById('display_name').value = d.user.display_name || '';
+        document.getElementById('steam_input').value = d.user.steam_id || '';
+        document.getElementById('discord_user_id').value = d.user.discord_user_id || '';
+      } catch (err) {
+        showResult('save-result', false, 'Load error: ' + err.message);
+      }
+    }
+
+    async function testSteam() {
+      const input = val('steam_input');
+      if (!input) return showResult('steam-result', false, '✗ Enter a value');
+      showResult('steam-result', true, 'Testing…');
+      try {
+        const r = await fetch('/api/users/resolve-steam', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ steam_input: input })
+        });
+        const d = await r.json();
+        if (d.ok) showResult('steam-result', true, `✓ "${d.persona_name}" (${d.steam_id})`);
+        else showResult('steam-result', false, '✗ ' + d.error);
+      } catch (err) { showResult('steam-result', false, '✗ ' + err.message); }
+    }
+
+    async function save() {
+      showResult('save-result', true, 'Saving…');
+      try {
+        const r = await fetch(`/api/users/${profile.id}`, {
+          method:'PATCH', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({
+            display_name: val('display_name'),
+            steam_input: val('steam_input'),
+            discord_user_id: val('discord_user_id')
+          })
+        });
+        const d = await r.json();
+        if (d.ok) {
+          showResult('save-result', true, '✓ Saved');
+          BL.setProfile(profile.id, val('display_name'));
+        } else showResult('save-result', false, '✗ ' + (d.error || 'Save failed'));
+      } catch (err) { showResult('save-result', false, '✗ ' + err.message); }
+    }
+
+
+    async function estimatePrices() {
+      const btn = document.getElementById('estimate-prices-btn');
+      btn.disabled = true;
+      showResult('estimate-result', true, 'Estimating…');
+      try {
+        const r = await fetch(`/api/users/${profile.id}/estimate-prices`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ re_estimate: true })
+        });
+        const d = await r.json();
+        if (d.ok) {
+          const parts = [];
+          if (d.updated) parts.push(`${d.updated} prices updated`);
+          if (d.marked_free) parts.push(`${d.marked_free} marked free`);
+          if (d.failed) parts.push(`${d.failed} not found`);
+          showResult('estimate-result', true, '✓ ' + (parts.join(', ') || 'No changes needed'));
+        } else {
+          showResult('estimate-result', false, '✗ ' + (d.error || 'Estimate failed'));
+        }
+      } catch (err) {
+        showResult('estimate-result', false, '✗ ' + err.message);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+
+
+    let savedImportDecisions = [];
+    let currentSavedDecisionIdx = null;
+
+    function describeDecision(d) {
+      if (d.action === 'ignore') return 'No match needed';
+      if (d.action === 'pending') return `Pending as “${d.custom_name || d.raw_name}”`;
+      if (d.action === 'bundle') return `Package/bundle: ${(d.games || []).map(g => g.name).join(', ') || 'missing games'}`;
+      if (d.action === 'match') return (d.games && d.games[0]) ? d.games[0].name : 'Matched to missing game';
+      return d.action;
+    }
+
+    async function openMatchManager() {
+      document.getElementById('match-manager-backdrop').style.display = 'block';
+      await loadSavedMatches();
+    }
+
+    function closeMatchManager() {
+      document.getElementById('match-manager-backdrop').style.display = 'none';
+    }
+
+    async function loadSavedMatches() {
+      const out = document.getElementById('match-manager-list');
+      out.innerHTML = '<div class="muted small">Loading saved matches…</div>';
+      showResult('matches-result', true, 'Loading…');
+      try {
+        const r = await fetch(`/api/users/${profile.id}/import-decisions`);
+        const d = await r.json();
+        if (!r.ok || !d.ok) throw new Error(d.error || 'Could not load saved matches');
+        savedImportDecisions = d.decisions || [];
+        renderSavedMatches();
+        showResult('matches-result', true, `✓ ${savedImportDecisions.length} saved choices`);
+      } catch (err) {
+        out.innerHTML = `<div class="err">${escapeHtml(err.message)}</div>`;
+        showResult('matches-result', false, '✗ ' + err.message);
+      }
+    }
+
+    function renderSavedMatches() {
+      const out = document.getElementById('match-manager-list');
+      const q = document.getElementById('match-manager-search').value.trim().toLowerCase();
+      const kind = document.getElementById('match-manager-kind').value;
+      let rows = savedImportDecisions.map((d, idx) => ({ d, idx }));
+      if (kind !== 'all') rows = rows.filter(x => x.d.import_kind === kind);
+      if (q) rows = rows.filter(x => (x.d.raw_name || '').toLowerCase().includes(q) || describeDecision(x.d).toLowerCase().includes(q));
+      if (!rows.length) {
+        out.innerHTML = '<div class="no-results">No saved matches found for this filter.</div>';
+        return;
+      }
+      out.innerHTML = `
+        <div class="saved-matches-list">
+          ${rows.map(({ d, idx }) => {
+            const isLicense = d.import_kind === 'license';
+            const label = isLicense ? 'Licence' : 'Purchase';
+            const actionButtons = [];
+            actionButtons.push(`<button class="btn-test btn-sm" data-saved-idx="${idx}" data-saved-action="change">Change match</button>`);
+            if (isLicense) actionButtons.push(`<button class="btn-test btn-sm" data-saved-idx="${idx}" data-saved-action="ignore">No match needed</button>`);
+            if (!isLicense) actionButtons.push(`<button class="btn-test btn-sm" data-saved-idx="${idx}" data-saved-action="pending">Make pending</button>`);
+            actionButtons.push(`<button class="btn-danger btn-sm" data-saved-idx="${idx}" data-saved-action="clear">Clear saved choice</button>`);
+            return `<article class="saved-match-card">
+              <div class="saved-match-main">
+                <div class="saved-match-source">
+                  <span class="saved-match-label">Source row</span>
+                  <strong>${escapeHtml(d.raw_name)}</strong>
+                </div>
+                <div class="saved-match-type">
+                  <span class="saved-match-label">Type</span>
+                  <span>${label}</span>
+                </div>
+                <div class="saved-match-choice">
+                  <span class="saved-match-label">Saved choice</span>
+                  <span>${escapeHtml(describeDecision(d))}</span>
+                </div>
+              </div>
+              <div class="saved-match-actions">${actionButtons.join(' ')}</div>
+            </article>`;
+          }).join('')}
+        </div>`;
+      out.querySelectorAll('[data-saved-action]').forEach(btn => {
+        btn.addEventListener('click', () => handleSavedMatchAction(parseInt(btn.dataset.savedIdx, 10), btn.dataset.savedAction));
+      });
+    }
+
+    async function handleSavedMatchAction(idx, action) {
+      const d = savedImportDecisions[idx];
+      if (!d) return;
+      if (action === 'change') return openSavedMatchModal(idx);
+      if (action === 'clear') {
+        if (!confirm(`Forget the saved choice for “${d.raw_name}”?`)) return;
+        return saveMatchDecision(d, null);
+      }
+      if (action === 'ignore') {
+        return saveMatchDecision(d, { action: 'ignore', app_ids: [] });
+      }
+      if (action === 'pending') {
+        const name = prompt('Save this purchase row as pending under what name?', d.custom_name || d.raw_name);
+        if (name === null) return;
+        return saveMatchDecision(d, { action: 'pending', app_ids: [], custom_name: name.trim() || d.raw_name });
+      }
+    }
+
+    async function saveMatchDecision(existing, patch) {
+      try {
+        if (patch === null) {
+          const r = await fetch(`/api/users/${profile.id}/import-decisions`, {
+            method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ import_kind: existing.import_kind, raw_name: existing.raw_name })
+          });
+          const d = await r.json();
+          if (!r.ok || !d.ok) throw new Error(d.error || 'Clear failed');
+        } else {
+          const r = await fetch(`/api/users/${profile.id}/import-decisions`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              import_kind: existing.import_kind,
+              raw_name: existing.raw_name,
+              action: patch.action,
+              app_ids: patch.app_ids || [],
+              custom_name: patch.custom_name || null
+            })
+          });
+          const d = await r.json();
+          if (!r.ok || !d.ok) throw new Error(d.error || 'Save failed');
+        }
+        await loadSavedMatches();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    function openSavedMatchModal(idx) {
+      currentSavedDecisionIdx = idx;
+      const d = savedImportDecisions[idx];
+      document.getElementById('saved-match-raw').textContent = `${d.import_kind === 'license' ? 'Licence' : 'Purchase'} row: ${d.raw_name}`;
+      document.getElementById('saved-match-search').value = d.raw_name || '';
+      document.getElementById('saved-match-backdrop').style.display = 'block';
+      searchSavedMatchLibrary();
+      setTimeout(() => document.getElementById('saved-match-search').focus(), 0);
+    }
+
+    function closeSavedMatchModal() {
+      document.getElementById('saved-match-backdrop').style.display = 'none';
+      currentSavedDecisionIdx = null;
+    }
+
+    async function searchSavedMatchLibrary() {
+      const input = document.getElementById('saved-match-search');
+      const out = document.getElementById('saved-match-results');
+      const q = input.value.trim();
+      out.innerHTML = '<div class="muted small">Searching…</div>';
+      try {
+        const r = await fetch(`/api/users/${profile.id}/library-search?q=${encodeURIComponent(q)}`);
+        const d = await r.json();
+        if (!d.games?.length) {
+          out.innerHTML = `<div class="no-results">No matches. <a href="#" id="saved-clear-search" class="link">Clear search to browse all games</a></div>`;
+          document.getElementById('saved-clear-search')?.addEventListener('click', e => { e.preventDefault(); input.value = ''; searchSavedMatchLibrary(); });
+          return;
+        }
+        out.innerHTML = d.games.map(g => `<div class="modal-result" data-app-id="${g.app_id}">${escapeHtml(g.name)}</div>`).join('');
+        out.querySelectorAll('.modal-result').forEach(div => {
+          div.addEventListener('click', async () => {
+            if (currentSavedDecisionIdx === null) return;
+            const existing = savedImportDecisions[currentSavedDecisionIdx];
+            await saveMatchDecision(existing, { action: 'match', app_ids: [parseInt(div.dataset.appId, 10)] });
+            closeSavedMatchModal();
+          });
+        });
+      } catch (err) {
+        out.innerHTML = `<div class="err">${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    document.getElementById('match-manager-search').addEventListener('input', renderSavedMatches);
+    document.getElementById('match-manager-kind').addEventListener('change', renderSavedMatches);
+    document.getElementById('match-manager-refresh').addEventListener('click', loadSavedMatches);
+    document.getElementById('match-manager-close').addEventListener('click', closeMatchManager);
+    document.getElementById('match-manager-backdrop').addEventListener('click', e => { if (e.target.id === 'match-manager-backdrop') closeMatchManager(); });
+    document.getElementById('saved-match-search').addEventListener('input', searchSavedMatchLibrary);
+    document.getElementById('saved-match-cancel').addEventListener('click', closeSavedMatchModal);
+    document.getElementById('saved-match-backdrop').addEventListener('click', e => { if (e.target.id === 'saved-match-backdrop') closeSavedMatchModal(); });
+
+    function escapeHtml(s) {
+      return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    async function deleteProfile() {
+      const pw = val('admin_pw');
+      if (!pw) return showResult('delete-result', false, '✗ Admin password required');
+      if (!confirm('Really delete this profile? All game data for it will be lost.')) return;
+      try {
+        const r = await fetch(`/api/users/${profile.id}`, {
+          method:'DELETE', headers: { 'x-admin-password': pw }
+        });
+        const d = await r.json();
+        if (d.ok) {
+          BL.clearProfile();
+          window.location.href = '/profiles.html';
+        } else showResult('delete-result', false, '✗ ' + (d.error || 'Delete failed'));
+      } catch (err) { showResult('delete-result', false, '✗ ' + err.message); }
+    }
+
+    // ============ Steam accounts management ============
+    let steamAccounts = [];
+
+    async function loadSteamAccounts() {
+      try {
+        const r = await fetch(`/api/users/${profile.id}/steam-accounts`);
+        const d = await r.json();
+        if (!d.ok) throw new Error(d.error || 'Failed to load accounts');
+        steamAccounts = d.accounts || [];
+        renderSteamAccounts();
+      } catch (err) {
+        document.getElementById('steam-accounts-list').textContent = 'Error loading accounts: ' + err.message;
+      }
+    }
+
+    function renderSteamAccounts() {
+      const list = document.getElementById('steam-accounts-list');
+      if (!steamAccounts.length) {
+        list.innerHTML = '<p class="muted">No Steam accounts linked. Add one above.</p>';
+        return;
+      }
+      list.innerHTML = steamAccounts.map(a => {
+        const lastSync = a.last_synced_at ? new Date(a.last_synced_at).toLocaleString() : 'never';
+        const safeName = String(a.persona_name || '').replace(/[<>&"']/g, c => ({ '<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;' }[c]));
+        const safeLabel = String(a.label || 'Account').replace(/[<>&"']/g, c => ({ '<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;' }[c]));
+        return `<div class="steam-account-row" style="display:flex;align-items:center;gap:1rem;padding:0.75rem;margin-bottom:0.5rem;background:rgba(255,255,255,0.03);border-radius:6px;">
+          ${a.avatar_url ? `<img src="${a.avatar_url}" class="avatar" alt="" style="width:36px;height:36px;border-radius:4px;" />` : ''}
+          <div style="flex:1;">
+            <div><strong class="account-label" data-account-id="${a.id}">${safeLabel}</strong> <span class="muted">— ${safeName}</span></div>
+            <small class="muted">Steam ID: ${a.steam_id} • Last synced: ${lastSync}</small>
+          </div>
+          <button class="btn-test btn-sm" type="button" onclick="renameAccount(${a.id})">Rename</button>
+          <button class="btn-test btn-sm" type="button" onclick="syncOneAccount(${a.id})">Sync</button>
+          ${steamAccounts.length > 1 ? `<button class="btn-danger btn-sm" type="button" onclick="removeAccount(${a.id})">Remove</button>` : ''}
+        </div>`;
+      }).join('');
+    }
+
+    function toggleAddAccount() {
+      const f = document.getElementById('add-account-form');
+      f.style.display = f.style.display === 'none' ? 'block' : 'none';
+      if (f.style.display === 'block') document.getElementById('new_account_input').focus();
+      document.getElementById('add-account-result').textContent = '';
+    }
+
+    async function addAccount() {
+      const input = document.getElementById('new_account_input').value.trim();
+      const label = document.getElementById('new_account_label').value.trim();
+      const r = document.getElementById('add-account-result');
+      if (!input) { r.textContent = '✗ Enter a Steam ID or vanity URL'; r.className = 'test-result err'; return; }
+      r.textContent = 'Adding…'; r.className = 'test-result';
+      try {
+        const res = await fetch(`/api/users/${profile.id}/steam-accounts`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ steam_input: input, label: label || null })
+        });
+        const d = await res.json();
+        if (d.ok) {
+          r.textContent = `✓ Added "${d.label}". Run a sync to import games.`;
+          r.className = 'test-result ok';
+          document.getElementById('new_account_input').value = '';
+          document.getElementById('new_account_label').value = '';
+          await loadSteamAccounts();
+        } else {
+          r.textContent = '✗ ' + (d.error || 'Failed');
+          r.className = 'test-result err';
+        }
+      } catch (err) { r.textContent = '✗ ' + err.message; r.className = 'test-result err'; }
+    }
+
+    async function renameAccount(accountId) {
+      const account = steamAccounts.find(a => a.id === accountId);
+      if (!account) return;
+      const newLabel = prompt('New label for this Steam account:', account.label || '');
+      if (newLabel === null) return;
+      const clean = newLabel.trim();
+      if (!clean) return alert('Label cannot be empty');
+      try {
+        const res = await fetch(`/api/users/${profile.id}/steam-accounts/${accountId}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ label: clean })
+        });
+        const d = await res.json();
+        if (d.ok) await loadSteamAccounts();
+        else alert('Error: ' + (d.error || 'Failed'));
+      } catch (err) { alert('Error: ' + err.message); }
+    }
+
+    async function syncOneAccount(accountId) {
+      const account = steamAccounts.find(a => a.id === accountId);
+      if (!account) return;
+      const btn = event.target;
+      const origText = btn.textContent;
+      btn.textContent = 'Syncing…';
+      btn.disabled = true;
+      try {
+        const res = await fetch(`/api/users/${profile.id}/steam-accounts/${accountId}/sync`, { method: 'POST' });
+        const d = await res.json();
+        if (d.ok) {
+          alert(`✓ "${account.label}" synced: ${d.added || 0} added, ${d.updated || 0} updated.`);
+          await loadSteamAccounts();
+        } else {
+          alert('✗ ' + (d.error || 'Sync failed'));
+        }
+      } catch (err) { alert('Error: ' + err.message); }
+      btn.textContent = origText;
+      btn.disabled = false;
+    }
+
+    async function removeAccount(accountId) {
+      const account = steamAccounts.find(a => a.id === accountId);
+      if (!account) return;
+      const pw = prompt(`Remove Steam account "${account.label}"? This will delete all games tied to ONLY this account. Enter admin password to confirm:`);
+      if (!pw) return;
+      try {
+        const res = await fetch(`/api/users/${profile.id}/steam-accounts/${accountId}`, {
+          method: 'DELETE',
+          headers: { 'x-admin-password': pw }
+        });
+        const d = await res.json();
+        if (d.ok) {
+          alert('✓ Account removed.');
+          await loadSteamAccounts();
+        } else {
+          alert('✗ ' + (d.error || 'Failed'));
+        }
+      } catch (err) { alert('Error: ' + err.message); }
+    }
+
+    loadSteamAccounts();
+    load();
+  </script>
+</body>
+</html>

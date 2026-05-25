@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leaderboard — The Backlog Ledger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..900,0..100,0..1&family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter+Tight:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<style>
+.lb-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; margin-bottom: 32px; }
+.lb-card { border: 1px solid var(--rule-strong); background: var(--bg-2); padding: 22px; position: relative; transition: border-color 0.3s; }
+.lb-card:hover { border-color: var(--gold); }
+.lb-card.you { border-color: var(--gold); }
+.lb-card.you::before {
+  content: "YOU"; position: absolute; top: -10px; right: 18px; background: var(--bg); padding: 0 8px;
+  font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 0.2em; color: var(--gold);
+}
+.lb-card.flash { animation: lb-pulse 1.4s ease-out; }
+@keyframes lb-pulse {
+  0% { border-color: var(--gold); box-shadow: 0 0 24px rgba(212,166,74,0.45); }
+  100% { border-color: var(--rule-strong); box-shadow: none; }
+}
+.lb-head { display: flex; gap: 14px; align-items: center; margin-bottom: 16px; }
+.lb-avatar { width: 56px; height: 56px; border-radius: 50%; border: 1px solid var(--rule); background: var(--bg); object-fit: cover; }
+.lb-name { font-family: 'Fraunces', serif; font-size: 22px; color: var(--ink); line-height: 1.1; }
+.lb-rank {
+  font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.2em;
+  text-transform: uppercase; color: var(--ink-faint); margin-top: 4px;
+}
+.lb-rank.gold { color: var(--gold); }
+
+.lb-headline {
+  font-family: 'Fraunces', serif; font-size: 40px; color: var(--paid); line-height: 1;
+  font-variation-settings: "opsz" 144; margin-bottom: 4px;
+}
+.lb-headline-label {
+  font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 0.22em;
+  text-transform: uppercase; color: var(--ink-faint); margin-bottom: 12px;
+}
+.lb-headline-sub {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--ink-dim); letter-spacing: 0.04em;
+}
+
+.lb-bar { height: 8px; background: var(--bg-3); border: 1px solid var(--rule); overflow: hidden; margin: 10px 0; }
+.lb-bar-fill { height: 100%; background: var(--paid); transition: width 0.8s ease; }
+
+.lb-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; margin: 16px 0; }
+.lb-stat-label {
+  font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 0.22em;
+  text-transform: uppercase; color: var(--ink-faint); margin-bottom: 2px;
+}
+.lb-stat-value {
+  font-family: 'Fraunces', serif; font-size: 20px; color: var(--ink); font-weight: 400;
+  font-variation-settings: "opsz" 144; letter-spacing: -0.01em;
+}
+.lb-stat-value.arrears { color: var(--arrears); }
+.lb-stat-value.gold { color: var(--gold); }
+
+.lb-counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--rule); }
+.lb-count {
+  font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.1em;
+  padding: 3px 8px; border: 1px solid currentColor;
+}
+.lb-count.paid { color: var(--paid); }
+.lb-count.arrears { color: var(--arrears); }
+.lb-count.outstanding { color: var(--outstanding); }
+.lb-count.free { color: var(--free); }
+
+.vs-section {
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--rule);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.vs-line {
+  font-family: 'Fraunces', serif; font-style: italic; font-size: 13px; color: var(--ink-dim);
+}
+.vs-line.ahead { color: var(--paid); }
+.vs-line.behind { color: var(--arrears); }
+.vs-line .icon { display: inline-block; width: 16px; }
+
+.lb-actions { display: flex; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--rule); }
+
+.lb-empty {
+  font-family: 'Fraunces', serif; font-style: italic; color: var(--ink-faint);
+  text-align: center; padding: 48px;
+}
+
+/* Champions strip */
+.champions {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;
+  margin-bottom: 32px; padding: 24px 20px 20px; border: 1px solid var(--rule-strong);
+  background: var(--bg-2); position: relative;
+}
+.champions::before {
+  content: "§ TROPHIES"; position: absolute; top: -10px; left: 20px; background: var(--bg);
+  padding: 0 10px; font-family: 'JetBrains Mono', monospace; font-size: 10px;
+  letter-spacing: 0.3em; color: var(--gold);
+}
+.champ { text-align: center; padding: 4px; }
+.champ-icon { font-size: 22px; margin-bottom: 6px; }
+.champ-label {
+  font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 0.22em;
+  text-transform: uppercase; color: var(--ink-faint); margin-bottom: 4px;
+}
+.champ-name { font-family: 'Fraunces', serif; font-style: italic; font-size: 18px; color: var(--gold); margin-bottom: 2px; }
+.champ-value { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--ink-dim); letter-spacing: 0.04em; }
+
+/* Shared library card */
+.shared-card {
+  border: 1px solid var(--rule-strong); background: var(--bg-2); padding: 20px 24px;
+  margin-bottom: 24px; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 20px; position: relative;
+}
+.shared-card::before {
+  content: "§ SHARED LIBRARY"; position: absolute; top: -10px; left: 20px; background: var(--bg);
+  padding: 0 10px; font-family: 'JetBrains Mono', monospace; font-size: 10px;
+  letter-spacing: 0.3em; color: var(--gold);
+}
+.shared-stat-label {
+  font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 0.22em;
+  text-transform: uppercase; color: var(--ink-faint); margin-bottom: 4px;
+}
+.shared-stat-value {
+  font-family: 'Fraunces', serif; font-size: 32px; color: var(--ink);
+  font-variation-settings: "opsz" 144; letter-spacing: -0.01em; line-height: 1;
+}
+.shared-stat-value.gold { color: var(--gold); }
+.shared-stat-sub { font-family: 'Fraunces', serif; font-style: italic; font-size: 13px; color: var(--ink-faint); margin-top: 4px; }
+
+/* Sort control */
+.lb-controls {
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 24px;
+}
+.lb-controls .tb-status { padding-left: 0; }
+
+.live-indicator { display: inline-flex; align-items: center; gap: 6px;
+  font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.18em;
+  text-transform: uppercase; color: var(--ink-faint); margin-left: 12px; }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); transition: background 0.2s; }
+.live-dot.connected { background: var(--paid); animation: live-pulse 2s infinite; }
+@keyframes live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <header class="masthead">
+    <div class="masthead-bar">
+      <div class="masthead-left">
+        <div class="masthead-title">Leaderboard</div>
+        <div class="masthead-sub">The reckoning, in aggregate.</div>
+      </div>
+      <div class="masthead-right">
+        <span class="live-indicator">
+          <span class="live-dot" id="live-dot"></span>
+          <span id="live-text">connecting…</span>
+        </span>
+        <a class="link" href="/index.html">← Back to your ledger</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- ============ PREAMBLE ============ -->
+  <section class="contract">
+    <div class="contract-text">
+      Here are gathered the standings of the household. Hours are recorded, debts are owed, and
+      <strong>the ledger shall not flatter the idle.</strong> Those with the highest share of contracts
+      settled rise to the top; those whose purchases sit untouched remain accountable.
+    </div>
+  </section>
+
+  <!-- ============ TROPHIES ============ -->
+  <div class="champions" id="champions" style="display:none;"></div>
+
+  <!-- ============ SHARED LIBRARY ============ -->
+  <div class="shared-card" id="shared-card" style="display:none;"></div>
+
+  <!-- ============ SORT CONTROLS ============ -->
+  <div class="lb-controls">
+    <label class="tb-status">RANK BY</label>
+    <select class="tb-select" id="sort-by">
+      <option value="settlement">Settlement % (the goal)</option>
+      <option value="xp">XP earned (since baseline)</option>
+      <option value="spent">Total spent</option>
+      <option value="hours">Total hours</option>
+      <option value="debt">Total debt (worst first)</option>
+      <option value="library">Library size</option>
+      <option value="recent">Recent activity (last 2 weeks)</option>
+      <option value="efficient">Most efficient (£/hr)</option>
+    </select>
+  </div>
+
+  <!-- ============ THE GRID ============ -->
+  <main id="leaderboard">
+    <div class="lb-empty">Loading…</div>
+  </main>
+
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="/js/app.js"></script>
+<script>
+const profile = BL.getProfile();
+if (!profile) { window.location.href = '/profiles.html'; }
+
+const $ = id => document.getElementById(id);
+const escHtml = s => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtMoney = (n) => '£' + (Math.round((n||0)*100)/100).toFixed(2);
+const fmtInt = (n) => Math.round(n || 0).toLocaleString();
+const fmtDelta = (n, suffix = '') => {
+  if (n > 0) return `+${n}${suffix}`;
+  return `${n}${suffix}`;
+};
+
+let lastData = { leaderboard: [], shared: null, group_gotw: null };
+let sortBy = 'settlement';
+
+// ---------- Sorting ----------
+const sorters = {
+  settlement: (a, b) => {
+    const sa = a.stats.settlement_rate ?? -1;
+    const sb = b.stats.settlement_rate ?? -1;
+    if (sa !== sb) return sb - sa;
+    return b.stats.counts.paid - a.stats.counts.paid;
+  },
+  xp: (a, b) => (b.stats.xp || 0) - (a.stats.xp || 0),
+  spent: (a, b) => b.stats.total_spent_pounds - a.stats.total_spent_pounds,
+  hours: (a, b) => b.stats.total_hours - a.stats.total_hours,
+  debt: (a, b) => b.stats.total_debt_pounds - a.stats.total_debt_pounds,
+  library: (a, b) => b.stats.games - a.stats.games,
+  recent: (a, b) => b.stats.hours_last_2weeks - a.stats.hours_last_2weeks,
+  efficient: (a, b) => {
+    const av = (a.stats.total_hours > 5 && a.stats.avg_price_per_hour !== null) ? a.stats.avg_price_per_hour : Infinity;
+    const bv = (b.stats.total_hours > 5 && b.stats.avg_price_per_hour !== null) ? b.stats.avg_price_per_hour : Infinity;
+    return av - bv;
+  },
+};
+
+// ---------- Render ----------
+function renderAll() {
+  const { leaderboard, shared, group_gotw } = lastData;
+  if (!leaderboard.length) {
+    $('leaderboard').innerHTML = '<div class="lb-empty">No players yet. Add some on the profiles page.</div>';
+    $('champions').style.display = 'none';
+    $('shared-card').style.display = 'none';
+    return;
+  }
+  renderGroupGotW(group_gotw);
+  renderTrophies(leaderboard);
+  renderShared(shared, leaderboard);
+  renderGrid(leaderboard);
+}
+
+function renderGroupGotW(gotw) {
+  // Banner is hosted in #group-gotw-banner — create it if missing
+  let banner = document.getElementById('group-gotw-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'group-gotw-banner';
+    banner.className = 'gotw-card';
+    banner.style.marginBottom = '24px';
+    // Insert before #champions
+    const champ = $('champions');
+    champ.parentNode.insertBefore(banner, champ);
+  }
+  if (!gotw) { banner.style.display = 'none'; return; }
+  banner.style.display = 'block';
+  banner.innerHTML = `
+    <div class="gotw-label">🎯 GROUP GAME OF THE WEEK</div>
+    <div class="gotw-name">${escHtml(gotw.name)}</div>
+    <div class="gotw-sub">Every hour played here this week earns +50% XP for all players</div>
+  `;
+}
+
+function renderGrid(data) {
+  const me = data.find(u => u.id === profile.id) || null;
+  const sorted = data.slice().sort(sorters[sortBy] || sorters.settlement);
+  $('leaderboard').innerHTML = `<div class="lb-grid">` + sorted.map((u, i) => renderCard(u, i + 1, me)).join('') + `</div>`;
+
+  document.querySelectorAll('[data-view-ledger]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      window.location.href = `/index.html?view=${btn.dataset.viewLedger}`;
+    });
+  });
+}
+
+function renderCard(u, rank, me) {
+  const isYou = u.id === profile.id;
+  const s = u.stats;
+  const sRate = s.settlement_rate;
+  const sDisplay = sRate === null ? '—' : sRate + '%';
+  const barWidth = sRate === null ? 0 : Math.min(100, sRate);
+  const rankClass = rank <= 3 ? 'gold' : '';
+  const rankLabel = ['🥇 1st', '🥈 2nd', '🥉 3rd'][rank - 1] || `#${rank}`;
+  const avatar = u.avatar_url || '';
+
+  // Head-to-head vs you (skip if this IS you, or you have no data)
+  let vsHtml = '';
+  if (!isYou && me) {
+    const lines = [];
+    const dSettle = (s.settlement_rate ?? 0) - (me.stats.settlement_rate ?? 0);
+    if (Math.abs(dSettle) >= 1) lines.push(vsLine(dSettle > 0, `${Math.abs(dSettle)}% more contracts settled than you`, dSettle < 0 ? `${Math.abs(dSettle)}% fewer contracts settled than you` : null));
+    const dHours = s.total_hours - me.stats.total_hours;
+    if (Math.abs(dHours) >= 5) lines.push(vsLine(dHours > 0, `${fmtInt(Math.abs(dHours))} more hours played`, `${fmtInt(Math.abs(dHours))} fewer hours played`));
+    const dSpent = s.total_spent_pounds - me.stats.total_spent_pounds;
+    if (Math.abs(dSpent) >= 1) lines.push(vsLine(dSpent < 0, `${fmtMoney(Math.abs(dSpent))} less spent`, `${fmtMoney(Math.abs(dSpent))} more spent`));
+    const dDebt = s.total_debt_pounds - me.stats.total_debt_pounds;
+    if (Math.abs(dDebt) >= 1) lines.push(vsLine(dDebt < 0, `${fmtMoney(Math.abs(dDebt))} less in arrears`, `${fmtMoney(Math.abs(dDebt))} deeper in debt`));
+    const dRecent = s.hours_last_2weeks - me.stats.hours_last_2weeks;
+    if (s.hours_last_2weeks > 0 && Math.abs(dRecent) >= 1) {
+      lines.push(vsLine(dRecent > 0, `${Math.round(Math.abs(dRecent))}h more this fortnight 🔥`, `${Math.round(Math.abs(dRecent))}h less this fortnight`));
+    }
+    if (lines.length) vsHtml = `<div class="vs-section">${lines.slice(0, 3).join('')}</div>`;
+  }
+
+  return `<article class="lb-card ${isYou ? 'you' : ''}" data-user-id="${u.id}">
+    <div class="lb-head">
+      ${avatar ? `<img class="lb-avatar" src="${escHtml(avatar)}" alt="" onerror="this.style.visibility='hidden'">` : `<div class="lb-avatar"></div>`}
+      <div>
+        <div class="lb-name">${escHtml(u.display_name)}</div>
+        <div class="lb-rank ${rankClass}">${rankLabel} • ${s.games} titles</div>
+      </div>
+    </div>
+
+    <div class="lb-headline-label">Contracts settled</div>
+    <div class="lb-headline">${sDisplay}</div>
+    <div class="lb-bar"><div class="lb-bar-fill" style="width:${barWidth}%"></div></div>
+    <div class="lb-headline-sub">${s.counts.paid}/${s.counts.contracts} contracts paid off${s.hours_last_2weeks > 0 ? ` • ${s.hours_last_2weeks}h this fortnight 🔥` : ''}</div>
+
+    <div class="lb-stats">
+      <div>
+        <div class="lb-stat-label">Spent</div>
+        <div class="lb-stat-value">${fmtMoney(s.total_spent_pounds)}</div>
+      </div>
+      <div>
+        <div class="lb-stat-label">Hours</div>
+        <div class="lb-stat-value">${fmtInt(s.total_hours)}</div>
+      </div>
+      <div>
+        <div class="lb-stat-label">Debt</div>
+        <div class="lb-stat-value arrears">${fmtMoney(s.total_debt_pounds)}</div>
+      </div>
+      <div>
+        <div class="lb-stat-label">Avg £/hr</div>
+        <div class="lb-stat-value">${s.avg_price_per_hour ? fmtMoney(s.avg_price_per_hour) : '—'}</div>
+      </div>
+    </div>
+
+    <div class="lb-counts">
+      <span class="lb-count paid">${s.counts.paid} paid</span>
+      <span class="lb-count arrears">${s.counts.arrears} arrears</span>
+      <span class="lb-count outstanding">${s.counts.outstanding} outstanding</span>
+      ${s.counts.free > 0 ? `<span class="lb-count free">${s.counts.free} free</span>` : ''}
+    </div>
+
+    <div class="xp-line">
+      <span class="xp-label">⚡ XP</span>
+      <span class="xp-value">${(s.xp || 0).toLocaleString()}</span>
+      ${s.xp_gotw_bonus > 0 ? `<span class="xp-bonus">+${s.xp_gotw_bonus} GotW bonus</span>` : ''}
+    </div>
+
+    ${u.personal_gotw ? `<div style="font-family:'Fraunces',serif;font-style:italic;font-size:13px;color:var(--ink-dim);margin-top:4px;padding-top:8px;border-top:1px solid var(--rule);">
+      🎲 Personal pick: <strong style="color:var(--gold);">${escHtml(u.personal_gotw.name)}</strong>
+    </div>` : ''}
+
+    ${vsHtml}
+
+    <div class="lb-actions">
+      <button class="tb-btn" data-view-ledger="${u.id}">View ledger</button>
+    </div>
+  </article>`;
+}
+
+function vsLine(positive, aheadMsg, behindMsg) {
+  const cls = positive ? 'ahead' : 'behind';
+  const icon = positive ? '▲' : '▼';
+  return `<div class="vs-line ${cls}"><span class="icon">${icon}</span> ${escHtml(positive ? aheadMsg : (behindMsg || aheadMsg))}</div>`;
+}
+
+function renderTrophies(data) {
+  const withGames = data.filter(u => u.stats.games > 0);
+  if (!withGames.length) { $('champions').style.display = 'none'; return; }
+
+  const max = (arr, fn) => arr.reduce((a, b) => (fn(b) > fn(a) ? b : a));
+  const min = (arr, fn) => arr.reduce((a, b) => (fn(b) < fn(a) ? b : a));
+
+  const champSettle = withGames.filter(u => u.stats.settlement_rate !== null).length
+    ? max(withGames.filter(u => u.stats.settlement_rate !== null), u => u.stats.settlement_rate)
+    : null;
+  const champSpent = max(withGames, u => u.stats.total_spent_pounds);
+  const champHours = max(withGames, u => u.stats.total_hours);
+  const champLibrary = max(withGames, u => u.stats.games);
+  const champDebt = max(withGames, u => u.stats.total_debt_pounds);
+  const champOutstanding = max(withGames, u => u.stats.counts.outstanding);
+  const eligibleEff = withGames.filter(u => u.stats.avg_price_per_hour !== null && u.stats.total_hours > 20);
+  const champEff = eligibleEff.length ? min(eligibleEff, u => u.stats.avg_price_per_hour) : null;
+  const recentlyActive = withGames.filter(u => u.stats.hours_last_2weeks > 0);
+  const champRecent = recentlyActive.length ? max(recentlyActive, u => u.stats.hours_last_2weeks) : null;
+
+  const trophies = [
+    { icon: '🏆', label: 'Settlement champion', name: champSettle?.display_name, value: champSettle ? champSettle.stats.settlement_rate + '% paid off' : null },
+    { icon: '💰', label: 'Heaviest spender', name: champSpent.display_name, value: fmtMoney(champSpent.stats.total_spent_pounds) },
+    { icon: '⏰', label: 'Most hours', name: champHours.display_name, value: fmtInt(champHours.stats.total_hours) + ' hours' },
+    { icon: '📚', label: 'Biggest library', name: champLibrary.display_name, value: champLibrary.stats.games + ' titles' },
+    { icon: '⚖️', label: 'Deepest in arrears', name: champDebt.display_name, value: fmtMoney(champDebt.stats.total_debt_pounds) + ' owed' },
+    { icon: '🎯', label: 'Most efficient', name: champEff?.display_name, value: champEff ? fmtMoney(champEff.stats.avg_price_per_hour) + '/hr' : null },
+    { icon: '🚫', label: 'Largest pile of shame', name: champOutstanding.display_name, value: champOutstanding.stats.counts.outstanding + ' unplayed' },
+    { icon: '🔥', label: 'Currently hottest', name: champRecent?.display_name, value: champRecent ? champRecent.stats.hours_last_2weeks + 'h this fortnight' : null },
+  ];
+
+  $('champions').style.display = 'grid';
+  $('champions').innerHTML = trophies
+    .filter(t => t.name && t.value)
+    .map(t => `<div class="champ">
+      <div class="champ-icon">${t.icon}</div>
+      <div class="champ-label">${escHtml(t.label)}</div>
+      <div class="champ-name">${escHtml(t.name)}</div>
+      <div class="champ-value">${escHtml(t.value)}</div>
+    </div>`).join('');
+}
+
+function renderShared(shared, leaderboard) {
+  if (!shared || leaderboard.length < 2) { $('shared-card').style.display = 'none'; return; }
+  $('shared-card').style.display = 'grid';
+  $('shared-card').innerHTML = `
+    <div>
+      <div class="shared-stat-label">Unique titles owned (group total)</div>
+      <div class="shared-stat-value">${fmtInt(shared.total_unique_titles)}</div>
+      <div class="shared-stat-sub">across ${leaderboard.length} ledgers</div>
+    </div>
+    <div>
+      <div class="shared-stat-label">Owned by 2+ of you</div>
+      <div class="shared-stat-value gold">${fmtInt(shared.total_shared_titles)}</div>
+      <div class="shared-stat-sub">titles in someone else's pile too</div>
+    </div>
+    <div>
+      <div class="shared-stat-label">Everyone owns</div>
+      <div class="shared-stat-value gold">${fmtInt(shared.everyone_owns)}</div>
+      <div class="shared-stat-sub">titles shared by all ${leaderboard.length} of you</div>
+    </div>
+  `;
+}
+
+// ---------- Sort wiring ----------
+$('sort-by').addEventListener('change', (e) => {
+  sortBy = e.target.value;
+  renderGrid(lastData.leaderboard);
+});
+
+// ---------- Fetch ----------
+async function loadLeaderboard() {
+  try {
+    const r = await fetch('/api/leaderboard');
+    if (!r.ok) { $('leaderboard').innerHTML = '<div class="lb-empty">Failed to load.</div>'; return; }
+    const d = await r.json();
+    lastData = { leaderboard: d.leaderboard || [], shared: d.shared || null, group_gotw: d.group_gotw || null };
+    renderAll();
+  } catch (err) {
+    $('leaderboard').innerHTML = `<div class="lb-empty">Error: ${escHtml(err.message)}</div>`;
+  }
+}
+
+// ---------- Socket.io live updates ----------
+const socket = io();
+socket.on('connect', () => {
+  $('live-dot').classList.add('connected');
+  $('live-text').textContent = 'live';
+});
+socket.on('disconnect', () => {
+  $('live-dot').classList.remove('connected');
+  $('live-text').textContent = 'offline';
+});
+socket.on('leaderboard:update', (msg) => {
+  loadLeaderboard().then(() => {
+    const card = document.querySelector(`.lb-card[data-user-id="${msg.user_id}"]`);
+    if (card) {
+      card.classList.remove('flash');
+      void card.offsetWidth;
+      card.classList.add('flash');
+    }
+  });
+});
+
+// ---------- Init ----------
+loadLeaderboard();
+setInterval(loadLeaderboard, 60000);
+window.addEventListener('bl:xp-recalculated', () => loadLeaderboard());
+</script>
+</body>
+</html>

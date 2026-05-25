@@ -1,0 +1,876 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Backlog Ledger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..900,0..100,0..1&family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter+Tight:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<style>
+/* Manual completion toggle: makes early completions obvious without changing the global stylesheet. */
+.row.completed-early {
+  outline: 1px solid rgba(191, 155, 90, 0.55);
+  background: linear-gradient(90deg, rgba(191, 155, 90, 0.13), rgba(191, 155, 90, 0.035));
+}
+.row.completed-early .row-title::after {
+  content: "COMPLETED EARLY";
+  display: inline-block;
+  margin-left: 0.65rem;
+  padding: 0.16rem 0.42rem;
+  border: 1px solid rgba(191, 155, 90, 0.72);
+  color: var(--gold);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  vertical-align: middle;
+}
+.status-pill.completed-early {
+  border-color: rgba(191, 155, 90, 0.85);
+  color: var(--gold);
+}
+.row-btn.completed-toggle-active {
+  border-color: rgba(191, 155, 90, 0.8);
+  color: var(--gold);
+  box-shadow: inset 0 0 0 1px rgba(191, 155, 90, 0.2);
+}
+.row-pct .completed-note {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--gold);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+</style>
+
+</head>
+<body>
+
+<div class="container">
+
+  <!-- ============ MASTHEAD (broadsheet style) ============ -->
+  <header class="masthead">
+    <div class="masthead-broadsheet">
+      <div class="ms-side ms-side-left">
+        <div class="ms-row"><span class="ms-label">VOL. I · NO. 001</span></div>
+        <div class="ms-row"><span class="ms-label">UPDATED</span> <span class="ms-val" id="ms-updated">—</span></div>
+      </div>
+      <div class="ms-center">
+        <div class="kicker">A PERSONAL ACCOUNTING</div>
+        <div class="masthead-title">The Backlog <em>Ledger</em></div>
+        <div class="masthead-sub" id="masthead-sub">An honest reckoning of pounds spent &amp; hours owed.</div>
+      </div>
+      <div class="ms-side ms-side-right">
+        <div class="ms-row"><span class="ms-label">LIBRARY</span> <span class="ms-val" id="ms-library">0</span></div>
+        <div class="ms-row"><span class="ms-label">CONTRACTS</span> <span class="ms-val" id="ms-contracts">0</span></div>
+        <div class="ms-row"><span class="ms-label">STANDING</span> <span class="ms-val" id="ms-standing">—</span></div>
+      </div>
+    </div>
+    <div class="profile-bar">
+      <div class="profile-switch">
+        <label class="tb-status">VIEWING</label>
+        <select id="profile-picker"></select>
+      </div>
+      <a class="leaderboard-hero" href="/leaderboard.html" aria-label="Open leaderboard">
+        <span class="leaderboard-hero-icon">🏆</span>
+        <span class="leaderboard-hero-text">Leaderboard</span>
+        <span class="leaderboard-hero-spark">✦</span>
+      </a>
+      <a class="link" href="/profiles.html">Switch profile</a>
+    </div>
+    <div id="readonly-banner" class="readonly-banner" style="display:none;">
+      👁 Read-only view — these are someone else's games.
+    </div>
+  </header>
+
+  <!-- ============ CONTRACT PREAMBLE ============ -->
+  <section class="contract">
+    <div class="contract-text">
+      The undersigned hereby pledges to honour, on each game in this library, the simple promise:
+      that <strong>for every pound paid, one hour shall be played.</strong> Free games carry no obligation.
+      All others are bound by contract until the hours equal the price — at which point the debt is dissolved
+      and the title may rest, completed, on the shelf.
+    </div>
+  </section>
+
+  <!-- ============ STATS ============ -->
+  <section class="stats">
+    <div class="stat-box">
+      <div class="stat-label">Total spent</div>
+      <div class="stat-value" id="st-spent">£0.00</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">Total hours</div>
+      <div class="stat-value" id="st-hours">0</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">Debt outstanding</div>
+      <div class="stat-value arrears" id="st-debt">£0.00</div>
+    </div>
+    <div class="stat-box xp-stat-box">
+      <div class="stat-label">⚡ XP earned</div>
+      <div class="stat-value" id="st-xp" style="color:var(--gold);">0</div>
+      <button class="xp-receipt-btn" id="btn-xp-receipt" type="button">View receipt</button>
+    </div>
+  </section>
+
+  <!-- ============ GAMES OF THE WEEK ============ -->
+  <section class="gotw-strip" id="gotw-strip" style="display:none;"></section>
+
+  <!-- ============ TOOLBAR ============ -->
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <button class="tb-btn filter-btn active" data-filter="all">All <span class="ct" id="ct-all">0</span></button>
+      <button class="tb-btn filter-btn" data-filter="contracts">Contracts <span class="ct" id="ct-contracts">0</span></button>
+      <button class="tb-btn filter-btn paid" data-filter="paid">Paid <span class="ct" id="ct-paid">0</span></button>
+      <button class="tb-btn filter-btn arrears" data-filter="arrears">Arrears <span class="ct" id="ct-arrears">0</span></button>
+      <button class="tb-btn filter-btn outstanding" data-filter="outstanding">Outstanding <span class="ct" id="ct-outstanding">0</span></button>
+      <button class="tb-btn filter-btn free" data-filter="free">Free <span class="ct" id="ct-free">0</span></button>
+    </div>
+    <div class="toolbar-right">
+      <input type="text" class="tb-search" id="search" placeholder="Search…" />
+      <select class="tb-select" id="sort">
+        <option value="pct">Sort: % paid</option>
+        <option value="name">Sort: name</option>
+        <option value="debt">Sort: debt</option>
+        <option value="figures">Sort: price</option>
+        <option value="hours">Sort: hours</option>
+        <option value="status">Sort: status</option>
+      </select>
+      <button class="tb-btn" id="sort-dir" title="Toggle direction">↓</button>
+      <button class="tb-btn" id="btn-sync" title="Sync Steam library">↻ Sync</button>
+      <a class="tb-btn" href="/profile-edit.html#ledger-imports" title="Import purchases, gifts, and price estimates">⚙ Profile tools</a>
+      <button class="tb-btn" id="btn-add-custom" title="Add a non-Steam game">+ Add custom</button>
+      <span class="tb-status ok" id="status">Loading…</span>
+    </div>
+  </div>
+
+  <!-- ============ THE LEDGER ============ -->
+  <main class="ledger" id="ledger">
+    <div class="empty-state">Loading your games…</div>
+  </main>
+
+</div>
+
+
+<!-- =============== XP Receipt =============== -->
+<div class="modal-bg" id="modal-xp-receipt" style="display:none;">
+  <div class="modal xp-receipt-modal">
+    <div class="modal-title">XP Receipt — <span id="xp-receipt-name"></span></div>
+    <div class="modal-sub">An itemised account of all XP presently recognised by the ledger.</div>
+    <div id="xp-receipt-body" class="xp-receipt-body">Loading…</div>
+    <div class="modal-actions">
+      <button class="tb-btn primary" id="xp-receipt-close">Receipt accepted</button>
+    </div>
+  </div>
+</div>
+
+<!-- =============== Notes Editor =============== -->
+<div class="modal-bg" id="modal-notes" style="display:none;">
+  <div class="modal narrow">
+    <div class="modal-title">Notes — <span id="notes-game-name"></span></div>
+    <textarea class="paste-area" id="notes-text" rows="6" placeholder="Personal notes about this game…"></textarea>
+    <div class="modal-actions">
+      <button class="tb-btn" id="notes-cancel">Cancel</button>
+      <button class="tb-btn primary" id="notes-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- =============== Weekly XP Winner Pick =============== -->
+<div class="modal-bg" id="modal-xp-winner" style="display:none;">
+  <div class="modal" style="max-width:560px;">
+    <div class="modal-title">🏆 You earned the most XP last week!</div>
+    <p id="xp-winner-summary" class="muted" style="margin-bottom:1rem;"></p>
+    <p style="margin-bottom:0.5rem;">As the weekly XP champion, you get to <strong>pick your own Personal Game of the Week</strong> instead of having it randomly assigned. Choose one of your unpaid contracts below:</p>
+    <input type="text" id="xp-winner-search" placeholder="Search your unpaid contracts…" style="width:100%;padding:8px;margin:0.75rem 0;background:rgba(255,255,255,0.05);border:1px solid var(--rule);border-radius:4px;color:var(--ink);" />
+    <div id="xp-winner-options" style="max-height:340px;overflow-y:auto;border:1px solid var(--rule);border-radius:4px;padding:0.5rem;">Loading…</div>
+    <div class="modal-actions">
+      <button class="tb-btn" id="xp-winner-skip">Skip for now</button>
+    </div>
+    <p class="muted small" style="margin-top:0.5rem;font-size:0.8rem;">If you don't pick by Friday 6pm UTC, a random one will be chosen for you.</p>
+  </div>
+</div>
+
+<!-- =============== Add Custom Game =============== -->
+<div class="modal-bg" id="modal-custom" style="display:none;">
+  <div class="modal narrow">
+    <div class="modal-title">A new <em>contract</em></div>
+    <div class="modal-sub">For games outside Steam — GOG, itch.io, board games, anything you want to track here.</div>
+    <div class="field">
+      <label>Title <span class="req">*</span></label>
+      <input id="custom-name-input" type="text" placeholder="e.g. Hollow Knight: Silksong" />
+    </div>
+    <div class="field">
+      <label>Price paid (£)</label>
+      <input id="custom-price-input" type="number" step="0.01" min="0" placeholder="0.00" />
+      <small>Leave blank for free games.</small>
+    </div>
+    <div class="field">
+      <label>Hours played</label>
+      <input id="custom-hours-input" type="number" step="0.1" min="0" placeholder="0" />
+    </div>
+    <div class="field">
+      <label>Notes</label>
+      <textarea class="paste-area" id="custom-notes-input" rows="3" placeholder="Optional…"></textarea>
+    </div>
+    <div class="modal-actions">
+      <button class="tb-btn" id="custom-cancel">Cancel</button>
+      <button class="tb-btn primary" id="custom-save">Add contract</button>
+    </div>
+  </div>
+</div>
+
+<script src="/js/app.js"></script>
+<script>
+// ============================================================
+// The Backlog Ledger — Phase 6 client
+// Port of the original Ledger UI, talking to our multi-user API.
+// ============================================================
+
+const profile = BL.getProfile();
+if (!profile) { window.location.href = '/profiles.html'; }
+
+const $ = id => document.getElementById(id);
+const escHtml = s => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const state = {
+  viewingUserId: profile.id,
+  viewingName: profile.name,
+  isOwnProfile: true,        // false when viewing someone else
+  games: [],
+  stats: null,
+  filter: 'all',
+  query: '',
+  sort: 'pct',
+  sortDir: 'desc',
+  editingNotesAppId: null,
+};
+
+// ---------- formatting (from original) ----------
+const fmtMoney = (n) => '£' + (Math.round((n||0)*100)/100).toFixed(2);
+const fmtHours = (n) => {
+  if (!n) return '0h';
+  if (n < 1) return Math.round(n * 60) + 'm';
+  return n.toFixed(1).replace(/\.0$/, '') + 'h';
+};
+
+// ---------- classify (port of original's logic) ----------
+function classify(g) {
+  // Map server fields to original model
+  g.hours = (g.playtime_minutes || 0) / 60;
+  g.price = (g.paid_price_cents || 0) / 100;
+  g.lname = (g.name || '').toLowerCase();
+  g.isCompletedToggle = g.play_status === 'completed' || !!g.completed_at;
+  g.isGifted = String(g.price_estimate_source || '').includes('Gift/Guest Pass');
+  g.completedEarly = false;
+
+  if (g.play_status === 'exempt') {
+    g.kind = 'exempt'; g.target = 0; g.debt = 0; g.pct = 0;
+  } else if (g.play_status === 'free' || g.price === 0) {
+    // Missing/blank/zero price carries no obligation: treat as free.
+    g.kind = 'free'; g.target = 0; g.debt = 0; g.pct = 100;
+  } else if (g.isCompletedToggle) {
+    // Manually toggled complete means the contract is settled, even if hours < price.
+    g.kind = 'paid'; g.target = g.price; g.debt = 0; g.pct = 100;
+    g.completedEarly = g.hours < g.price;
+  } else {
+    g.target = g.price;
+    g.debt = Math.max(0, g.price - g.hours);
+    g.pct = Math.min(999, (g.hours / g.price) * 100);
+    if (g.hours >= g.price) g.kind = 'paid';
+    else if (g.hours > 0) g.kind = 'arrears';
+    else g.kind = 'outstanding';
+  }
+}
+
+// ---------- counts ----------
+function recomputeStats() {
+  const c = { all: state.games.length, contracts: 0, paid: 0, arrears: 0, outstanding: 0, free: 0, exempt: 0 };
+  let spent = 0, hours = 0, debt = 0;
+  state.games.forEach(g => {
+    hours += g.hours;
+    if (g.kind === 'free') c.free++;
+    else if (g.kind === 'exempt') c.exempt++;
+    else { c.contracts++; c[g.kind]++; if (g.price > 0) { spent += g.price; debt += g.debt; } }
+  });
+  state.stats = { counts: c, spent, hours, debt, avgPerHr: hours > 0 ? spent / hours : null };
+}
+
+// ---------- visible list (port from original) ----------
+function visibleGames() {
+  let list = state.games.slice();
+  if (state.filter === 'contracts') list = list.filter(g => ['paid','arrears','outstanding'].includes(g.kind));
+  else if (state.filter === 'paid') list = list.filter(g => g.kind === 'paid');
+  else if (state.filter === 'arrears') list = list.filter(g => g.kind === 'arrears');
+  else if (state.filter === 'outstanding') list = list.filter(g => g.kind === 'outstanding');
+  else if (state.filter === 'free') list = list.filter(g => g.kind === 'free');
+
+  if (state.query) list = list.filter(g => g.lname.includes(state.query));
+
+  const dir = state.sortDir === 'asc' ? 1 : -1;
+  const cmp = {
+    name: (a,b) => a.lname.localeCompare(b.lname) * dir,
+    pct:  (a,b) => (a.pct - b.pct) * dir,
+    debt: (a,b) => (a.debt - b.debt) * dir,
+    figures: (a,b) => ((a.price||0) - (b.price||0)) * dir,
+    hours: (a,b) => (a.hours - b.hours) * dir,
+    status: (a,b) => {
+      const order = { arrears: 0, outstanding: 1, paid: 2, free: 3, exempt: 4 };
+      return (order[a.kind] - order[b.kind]) * dir;
+    }
+  };
+  list.sort(cmp[state.sort] || cmp.pct);
+  return list;
+}
+
+// ---------- render ----------
+function renderStats() {
+  if (!state.stats) return;
+  $('st-spent').textContent = fmtMoney(state.stats.spent);
+  $('st-hours').textContent = Math.round(state.stats.hours);
+  $('st-debt').textContent = fmtMoney(state.stats.debt);
+  $('st-xp').textContent = (state.xp ?? 0).toLocaleString();
+  const c = state.stats.counts;
+  $('ct-all').textContent = c.all;
+  $('ct-contracts').textContent = c.contracts;
+  $('ct-paid').textContent = c.paid;
+  $('ct-arrears').textContent = c.arrears;
+  $('ct-outstanding').textContent = c.outstanding;
+  $('ct-free').textContent = c.free;
+  // Masthead broadsheet panels
+  $('ms-library').textContent = c.all;
+  $('ms-contracts').textContent = c.contracts;
+  const settle = c.contracts > 0 ? Math.round((c.paid / c.contracts) * 100) + '%' : '—';
+  $('ms-standing').textContent = settle;
+  $('ms-updated').textContent = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }).toUpperCase();
+}
+
+function renderGotW() {
+  const strip = $('gotw-strip');
+  if (!state.gotw || (!state.gotw.group && !state.gotw.personal)) {
+    strip.style.display = 'none';
+    return;
+  }
+  strip.style.display = 'grid';
+  const items = [];
+  if (state.gotw.group) {
+    const g = state.gotw.group;
+    let settledHtml = '';
+    if (g.settled_by && g.settled_by.length) {
+      settledHtml = `<div class="gotw-settled">✓ Settled by: ${g.settled_by.map(escHtml).join(', ')}</div>`;
+    }
+    if (g.still_owes && g.still_owes.length) {
+      settledHtml += `<div class="gotw-owes">Still owes: ${g.still_owes.map(escHtml).join(', ')}</div>`;
+    }
+    items.push(`<div class="gotw-card">
+      <div class="gotw-label">🎯 Group Game of the Week</div>
+      <div class="gotw-name">${escHtml(g.name)}</div>
+      <div class="gotw-sub">+50% XP for hours played on this title</div>
+      ${settledHtml}
+    </div>`);
+  }
+  if (state.gotw.personal) {
+    const p = state.gotw.personal;
+    const settledNote = p.settled ? '<div class="gotw-settled">✓ You\'ve settled this one!</div>' : '';
+    items.push(`<div class="gotw-card">
+      <div class="gotw-label">🎲 Your Personal Pick</div>
+      <div class="gotw-name">${escHtml(p.name)}</div>
+      <div class="gotw-sub">${p.hours.toFixed(1)}h / £${p.price.toFixed(2)} • +50% XP</div>
+      ${settledNote}
+    </div>`);
+  }
+  strip.innerHTML = items.join('');
+}
+
+function renderLedger() {
+  const list = visibleGames();
+  const ledger = $('ledger');
+  if (!list.length) {
+    ledger.innerHTML = `<div class="empty-state">
+      ${state.games.length === 0
+        ? 'No games yet. Click ↻ Sync to import your library, then use Profile tools to add prices.'
+        : 'No games match this filter.'}
+    </div>`;
+    return;
+  }
+  ledger.innerHTML = list.map(g => renderRow(g)).join('');
+
+  // Wire up inline editing — only on own profile
+  if (state.isOwnProfile) {
+    ledger.querySelectorAll('[data-edit-price]').forEach(el => el.addEventListener('blur', onPriceBlur));
+    ledger.querySelectorAll('[data-edit-hours]').forEach(el => el.addEventListener('blur', onHoursBlur));
+    ledger.querySelectorAll('[data-action="notes"]').forEach(el => el.addEventListener('click', () => openNotesModal(parseInt(el.dataset.appId))));
+    ledger.querySelectorAll('[data-action="toggle-exempt"]').forEach(el => el.addEventListener('click', () => toggleExempt(parseInt(el.dataset.appId))));
+    ledger.querySelectorAll('[data-action="toggle-complete"]').forEach(el => el.addEventListener('click', () => toggleComplete(parseInt(el.dataset.appId))));
+    ledger.querySelectorAll('[data-action="toggle-breakdown"]').forEach(el => el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const appId = el.dataset.appId;
+      const panel = document.getElementById('breakdown-' + appId);
+      if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+    }));
+  }
+}
+
+function renderRow(g) {
+  const kind = g.kind;
+  const completedLabel = g.completedEarly ? '<span class="completed-note">settled early</span>' : '';
+  const pctDisplay = (kind === 'paid' || kind === 'free') ? '100%' :
+                     kind === 'exempt' ? '—' :
+                     g.price === 0 ? '—' :
+                     Math.round(g.pct) + '%';
+  const debtDisplay = kind === 'paid' || kind === 'free' || kind === 'exempt' || g.price === 0
+                      ? '—' : fmtMoney(g.debt);
+  const figuresDisplay = g.price === 0 ? (kind === 'free' ? 'Free' : '—') : fmtMoney(g.price);
+  const barWidth = kind === 'exempt' || g.price === 0 ? 0 : Math.min(100, g.pct);
+  const statusText = g.completedEarly ? 'completed early' : kind;
+  const statusClass = g.completedEarly ? 'completed-early' : `kind-${kind}`;
+  const completeButtonTitle = g.isCompletedToggle ? 'Undo manual complete' : 'Mark paid - complete';
+  const completeButtonText = g.isCompletedToggle ? '↺✓' : '✓';
+  const completeButtonClass = g.isCompletedToggle ? ' completed-toggle-active' : '';
+  const hasNotes = !!(g.notes && g.notes.trim().length);
+  const isCustom = g.app_id < 0;
+  const iconHtml = isCustom
+    ? `<div class="row-icon row-icon-custom">§</div>`
+    : `<div class="row-icon"><img src="https://cdn.cloudflare.steamstatic.com/steam/apps/${g.app_id}/capsule_184x69.jpg" alt="" onerror="this.style.visibility='hidden'"></div>`;
+  const ro = state.isOwnProfile ? '' : 'readonly tabindex="-1"';
+  const editAttr = state.isOwnProfile ? 'contenteditable="true"' : '';
+
+  // Build per-account breakdown HTML when this row has account data and the user has ≥2 accounts
+  let breakdownHtml = '';
+  let badgesHtml = '';
+  const showAccountUI = state.hasMultipleAccounts && Array.isArray(g.account_breakdown) && g.account_breakdown.length > 0;
+  if (showAccountUI) {
+    const badgeLabels = g.steam_accounts.length > 0 ? g.steam_accounts : g.account_breakdown.map(b => ({ id: b.account_id, label: b.label }));
+    badgesHtml = badgeLabels.map(a => `<span class="account-badge clickable" data-action="toggle-breakdown" data-app-id="${g.app_id}" title="Click for per-account breakdown">${escHtml(a.label)}</span>`).join('');
+    const rows = g.account_breakdown.map(b => `<div class="breakdown-row">
+      <span class="breakdown-label">${escHtml(b.label)}</span>
+      <span class="breakdown-hours">${b.hours.toFixed(1)}h</span>
+      <span class="breakdown-price">£${((b.price_cents || 0) / 100).toFixed(2)}</span>
+    </div>`).join('');
+    breakdownHtml = `<div class="account-breakdown" id="breakdown-${g.app_id}" style="display:none;">
+      <div class="breakdown-header">Per-account breakdown</div>
+      ${rows}
+      <div class="breakdown-row total">
+        <span class="breakdown-label">Total</span>
+        <span class="breakdown-hours">${g.hours.toFixed(1)}h</span>
+        <span class="breakdown-price">£${(g.price || 0).toFixed(2)}</span>
+      </div>
+    </div>`;
+  }
+
+  return `<article class="row kind-${kind}${g.completedEarly ? ' completed-early' : ''}" data-app-id="${g.app_id}">
+    ${iconHtml}
+    <div class="row-name">
+      <div class="row-title">${escHtml(g.name)}${isCustom ? ' <span class="custom-flag" title="Custom (non-Steam) entry">CUSTOM</span>' : ''}${g.manual_override && !isCustom ? ' <span class="manual-flag" title="Manually edited">✎</span>' : ''}${badgesHtml}</div>
+      <div class="row-meta"><span>${fmtHours(g.hours)} played</span>${g.isGifted ? ` <span class="gifted-flag" title="${escHtml(g.price_estimate_source || 'Gifted')}">GIFTED</span>` : ''}${g.price_is_estimated ? ` <span class="estimated-flag" title="${escHtml(g.price_estimate_source || 'Estimated price')}">EST</span>` : ''}</div>
+      ${breakdownHtml}
+    </div>
+    <div class="row-figures">
+      <span class="cell-label">PRICE</span>
+      <span class="cell-value editable-cell" data-edit-price data-app-id="${g.app_id}" ${editAttr}>${g.price_is_estimated ? '≈ ' : ''}${figuresDisplay}</span>
+    </div>
+    <div class="row-hours">
+      <span class="cell-label">HOURS</span>
+      <span class="cell-value editable-cell" data-edit-hours data-app-id="${g.app_id}" ${editAttr}>${fmtHours(g.hours)}</span>
+    </div>
+    <div class="row-pct">
+      <span class="cell-label">PAID OFF</span>
+      <span class="cell-value">${pctDisplay}</span>${completedLabel}
+      <div class="bar"><div class="bar-fill kind-${kind}" style="width:${barWidth}%"></div></div>
+    </div>
+    <div class="row-debt">
+      <span class="cell-label">DEBT</span>
+      <span class="cell-value">${debtDisplay}</span>
+    </div>
+    <div class="row-status">
+      <span class="status-pill ${statusClass}">${statusText}</span>
+    </div>
+    ${state.isOwnProfile ? `<div class="row-actions">
+      <button class="row-btn" data-action="notes" data-app-id="${g.app_id}" title="Notes">${hasNotes ? '📝' : '✎'}</button>
+      <button class="row-btn" data-action="toggle-exempt" data-app-id="${g.app_id}" title="${kind === 'exempt' ? 'Re-include' : 'Mark exempt'}">${kind === 'exempt' ? '↺' : '×'}</button>
+      ${kind === 'arrears' || kind === 'outstanding' || g.isCompletedToggle ? `<button class="row-btn${completeButtonClass}" data-action="toggle-complete" data-app-id="${g.app_id}" title="${completeButtonTitle}">${completeButtonText}</button>` : ''}
+    </div>` : ''}
+  </article>`;
+}
+
+// ---------- inline editing ----------
+async function onPriceBlur(e) {
+  const appId = parseInt(e.target.dataset.appId);
+  const text = e.target.textContent.trim().replace(/[£,]/g, '');
+  const val = parseFloat(text);
+  if (isNaN(val) || val < 0) { await reload(); return; }
+  await patchGame(appId, { paid_price_cents: Math.round(val * 100) });
+  await reload();
+}
+
+async function onHoursBlur(e) {
+  const appId = parseInt(e.target.dataset.appId);
+  const text = e.target.textContent.trim().replace(/[h,]/gi, '');
+  const val = parseFloat(text);
+  if (isNaN(val) || val < 0) { await reload(); return; }
+  await patchGame(appId, { playtime_minutes: Math.round(val * 60) });
+  await reload();
+}
+
+async function toggleExempt(appId) {
+  const game = state.games.find(g => g.app_id === appId);
+  const newStatus = game.kind === 'exempt' ? 'unplayed' : 'exempt';
+  await patchGame(appId, { play_status: newStatus });
+  await reload();
+}
+
+async function toggleComplete(appId) {
+  const game = state.games.find(g => g.app_id === appId);
+  const isComplete = !!(game && game.isCompletedToggle);
+  await patchGame(appId, {
+    play_status: isComplete ? 'unplayed' : 'completed',
+    completed: !isComplete
+  });
+  await reload();
+}
+
+async function patchGame(appId, body) {
+  setStatus('saving');
+  try {
+    const r = await fetch(`/api/users/${state.viewingUserId}/games/${appId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) {
+      const d = await r.json();
+      setStatus('error', d.error);
+      return;
+    }
+    setStatus('ok');
+  } catch (err) { setStatus('error', err.message); }
+}
+
+// ---------- XP receipt ----------
+function fmtXp(n) {
+  return (Math.round((n || 0) * 10) / 10).toLocaleString(undefined, { maximumFractionDigits: 1 });
+}
+
+function renderXpReceipt(data) {
+  const receipt = data.receipt || {};
+  const entries = receipt.entries || [];
+  const totals = `
+    <div class="xp-receipt-summary">
+      <div><span>Total XP</span><strong>${fmtXp(receipt.total)}</strong></div>
+      <div><span>Contract XP</span><strong>${fmtXp(receipt.from_contracts)}</strong></div>
+      <div><span>Game of the Week bonus</span><strong>${fmtXp(receipt.from_gotw_bonus)}</strong></div>
+    </div>`;
+  if (!entries.length) {
+    return totals + `<div class="empty-state xp-receipt-empty">No XP has been earned yet. XP is awarded for hours played after your baseline, while a paid contract is still unpaid. Free, gifted, exempt, and already-settled games do not yield XP.</div>`;
+  }
+  const rows = entries.map(e => `
+    <tr>
+      <td class="xp-game">${escHtml(e.name)}</td>
+      <td>${fmtXp(e.baseline_hours)}h → ${fmtXp(e.current_hours)}h</td>
+      <td>${fmtXp(e.counted_hours)}h</td>
+      <td>${fmtXp(e.base_xp)}</td>
+      <td>${e.bonus_xp > 0 ? `+${fmtXp(e.bonus_xp)}${e.bonus_type ? `<br><small>${escHtml(e.bonus_type)}</small>` : ''}` : '—'}</td>
+      <td><strong>${fmtXp(e.total_xp)}</strong></td>
+    </tr>`).join('');
+  return totals + `
+    <div class="xp-receipt-note">XP counts only the post-baseline hours that were spent before each game reached its £1 = 1 hour contract threshold.</div>
+    <div class="xp-receipt-table-wrap">
+      <table class="xp-receipt-table">
+        <thead><tr><th>Game</th><th>Hours measured</th><th>Counted</th><th>Base XP</th><th>Bonus</th><th>Total</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+async function openXpReceipt() {
+  $('modal-xp-receipt').style.display = 'flex';
+  $('xp-receipt-name').textContent = state.viewingName || 'this ledger';
+  $('xp-receipt-body').innerHTML = 'Loading…';
+  try {
+    const r = await fetch(`/api/users/${state.viewingUserId}/xp-receipt`);
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || 'Could not load XP receipt');
+    $('xp-receipt-name').textContent = d.user?.display_name || state.viewingName || 'this ledger';
+    $('xp-receipt-body').innerHTML = renderXpReceipt(d);
+  } catch (err) {
+    $('xp-receipt-body').innerHTML = `<div class="empty-state xp-receipt-empty">${escHtml(err.message)}</div>`;
+  }
+}
+
+$('btn-xp-receipt').addEventListener('click', openXpReceipt);
+$('xp-receipt-close').addEventListener('click', () => { $('modal-xp-receipt').style.display = 'none'; });
+$('modal-xp-receipt').addEventListener('click', (e) => { if (e.target.id === 'modal-xp-receipt') $('modal-xp-receipt').style.display = 'none'; });
+
+// ---------- notes ----------
+function openNotesModal(appId) {
+  const g = state.games.find(x => x.app_id === appId);
+  if (!g) return;
+  state.editingNotesAppId = appId;
+  $('notes-game-name').textContent = g.name;
+  $('notes-text').value = g.notes || '';
+  $('modal-notes').style.display = 'flex';
+}
+$('notes-cancel').addEventListener('click', () => { $('modal-notes').style.display = 'none'; state.editingNotesAppId = null; });
+$('notes-save').addEventListener('click', async () => {
+  if (state.editingNotesAppId === null) return;
+  const notes = $('notes-text').value;
+  await patchGame(state.editingNotesAppId, { notes });
+  $('modal-notes').style.display = 'none';
+  state.editingNotesAppId = null;
+  await reload();
+});
+
+// ---------- XP winner pick modal ----------
+let xpWinnerOptions = [];
+
+async function openXpWinnerModal(status) {
+  const xpStr = (status.xp_gained || 0).toFixed(1);
+  const hrsStr = (status.hours_gained || 0).toFixed(1);
+  $('xp-winner-summary').textContent = `You gained ${xpStr} XP and ${hrsStr} hours this week — the most of anyone in the group.`;
+  $('xp-winner-options').textContent = 'Loading your unpaid contracts…';
+  $('modal-xp-winner').style.display = 'flex';
+  $('xp-winner-search').value = '';
+  try {
+    const r = await fetch(`/api/users/${state.viewingUserId}/xp-winner-options`);
+    const d = await r.json();
+    if (!d.ok) {
+      $('xp-winner-options').textContent = 'Error: ' + (d.error || 'failed');
+      return;
+    }
+    xpWinnerOptions = d.options || [];
+    renderXpWinnerOptions('');
+  } catch (err) {
+    $('xp-winner-options').textContent = 'Error: ' + err.message;
+  }
+}
+
+function renderXpWinnerOptions(filter) {
+  const list = $('xp-winner-options');
+  if (!xpWinnerOptions.length) {
+    list.textContent = 'No unpaid contracts to pick from.';
+    return;
+  }
+  const f = String(filter || '').toLowerCase().trim();
+  const filtered = f ? xpWinnerOptions.filter(o => o.name.toLowerCase().includes(f)) : xpWinnerOptions;
+  if (!filtered.length) {
+    list.textContent = 'No matches.';
+    return;
+  }
+  list.innerHTML = filtered.map(o => `<div class="xp-winner-option" data-app-id="${o.app_id}" style="padding:8px 10px;cursor:pointer;border-radius:4px;display:flex;justify-content:space-between;align-items:center;gap:1rem;">
+    <span><strong>${escHtml(o.name)}</strong></span>
+    <span class="muted" style="font-size:0.85rem;font-family:'JetBrains Mono',monospace;">${o.hours.toFixed(1)}h / £${o.price.toFixed(2)} • £${o.debt.toFixed(2)} debt</span>
+  </div>`).join('');
+  list.querySelectorAll('.xp-winner-option').forEach(el => {
+    el.addEventListener('mouseenter', () => el.style.background = 'rgba(212,175,55,0.1)');
+    el.addEventListener('mouseleave', () => el.style.background = '');
+    el.addEventListener('click', () => pickXpWinnerGame(parseInt(el.dataset.appId)));
+  });
+}
+
+async function pickXpWinnerGame(appId) {
+  const game = xpWinnerOptions.find(o => o.app_id === appId);
+  if (!game) return;
+  if (!confirm(`Pick "${game.name}" as your Personal Game of the Week?`)) return;
+  try {
+    const r = await fetch(`/api/users/${state.viewingUserId}/xp-winner-pick`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app_id: appId })
+    });
+    const d = await r.json();
+    if (d.ok) {
+      $('modal-xp-winner').style.display = 'none';
+      await reload();
+    } else {
+      alert('Error: ' + (d.error || 'Failed to set pick'));
+    }
+  } catch (err) { alert('Error: ' + err.message); }
+}
+
+$('xp-winner-search').addEventListener('input', e => renderXpWinnerOptions(e.target.value));
+$('xp-winner-skip').addEventListener('click', () => { $('modal-xp-winner').style.display = 'none'; });
+$('modal-xp-winner').addEventListener('click', (e) => { if (e.target.id === 'modal-xp-winner') $('modal-xp-winner').style.display = 'none'; });
+
+// ---------- custom game modal ----------
+$('btn-add-custom').addEventListener('click', () => {
+  if (!state.isOwnProfile) { setStatus('error', 'Switch to your own profile to add games'); return; }
+  $('custom-name-input').value = '';
+  $('custom-price-input').value = '';
+  $('custom-hours-input').value = '';
+  $('custom-notes-input').value = '';
+  $('modal-custom').style.display = 'flex';
+  setTimeout(() => $('custom-name-input').focus(), 50);
+});
+$('custom-cancel').addEventListener('click', () => { $('modal-custom').style.display = 'none'; });
+$('modal-custom').addEventListener('click', (e) => { if (e.target.id === 'modal-custom') $('modal-custom').style.display = 'none'; });
+$('custom-save').addEventListener('click', async () => {
+  const name = $('custom-name-input').value.trim();
+  if (!name) { $('custom-name-input').focus(); return; }
+  const priceVal = parseFloat($('custom-price-input').value);
+  const hoursVal = parseFloat($('custom-hours-input').value);
+  const notes = $('custom-notes-input').value.trim();
+  const body = {
+    name,
+    paid_price_cents: isNaN(priceVal) ? 0 : Math.round(priceVal * 100),
+    playtime_minutes: isNaN(hoursVal) ? 0 : Math.round(hoursVal * 60),
+    notes: notes || null,
+  };
+  setStatus('saving');
+  try {
+    const r = await fetch(`/api/users/${state.viewingUserId}/custom-game`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (!d.ok) { setStatus('error', d.error); return; }
+    $('modal-custom').style.display = 'none';
+    setStatus('ok');
+    await reload();
+  } catch (err) { setStatus('error', err.message); }
+});
+
+// ---------- status indicator ----------
+function setStatus(s, msg) {
+  const el = $('status');
+  el.classList.remove('ok','saving','error','empty');
+  if (s === 'saving') { el.classList.add('saving'); el.textContent = 'Saving…'; }
+  else if (s === 'error') { el.classList.add('error'); el.textContent = msg || 'Save failed'; }
+  else if (s === 'empty') { el.classList.add('empty'); el.textContent = 'No library loaded'; }
+  else { el.classList.add('ok'); el.textContent = state.games.length + ' titles'; }
+}
+
+// ---------- toolbar wiring ----------
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    state.filter = btn.dataset.filter;
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b === btn));
+    renderLedger();
+  });
+});
+
+$('search').addEventListener('input', (e) => {
+  state.query = e.target.value.toLowerCase().trim();
+  renderLedger();
+});
+
+$('sort').addEventListener('change', (e) => { state.sort = e.target.value; renderLedger(); });
+$('sort-dir').addEventListener('click', () => {
+  state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
+  $('sort-dir').textContent = state.sortDir === 'asc' ? '↑' : '↓';
+  renderLedger();
+});
+
+$('btn-sync').addEventListener('click', async () => {
+  if (!state.isOwnProfile) { setStatus('error', 'Can only sync your own profile'); return; }
+  $('btn-sync').disabled = true;
+  setStatus('saving');
+  try {
+    const r = await fetch(`/api/users/${state.viewingUserId}/sync`, { method: 'POST' });
+    const d = await r.json();
+    if (!d.ok) { setStatus('error', d.error); $('btn-sync').disabled = false; return; }
+    await reload();
+  } catch (err) { setStatus('error', err.message); }
+  $('btn-sync').disabled = false;
+});
+
+
+// ---------- profile picker (multi-profile viewing) ----------
+async function loadProfilePicker() {
+  try {
+    const r = await fetch('/api/users');
+    const d = await r.json();
+    const sel = $('profile-picker');
+    sel.innerHTML = d.users.map(u =>
+      `<option value="${u.id}" ${u.id === state.viewingUserId ? 'selected' : ''}>${escHtml(u.display_name)}</option>`
+    ).join('');
+    sel.addEventListener('change', () => {
+      const newId = parseInt(sel.value);
+      state.viewingUserId = newId;
+      state.isOwnProfile = (newId === profile.id);
+      const selectedName = sel.options[sel.selectedIndex].text;
+      state.viewingName = selectedName;
+      $('readonly-banner').style.display = state.isOwnProfile ? 'none' : 'block';
+      $('masthead-sub').textContent = state.isOwnProfile
+        ? 'A reckoning, in hours.'
+        : `Viewing ${selectedName}'s ledger`;
+      reload();
+    });
+  } catch (err) { console.error('Profile load failed', err); }
+}
+
+// ---------- load / reload ----------
+async function reload() {
+  try {
+    const r = await fetch(`/api/users/${state.viewingUserId}/games`);
+    if (!r.ok) { setStatus('error', 'Load failed'); return; }
+    const d = await r.json();
+    state.games = d.games || [];
+    state.accounts = d.accounts || [];
+    state.hasMultipleAccounts = state.accounts.length >= 2;
+    state.games.forEach(classify);
+    recomputeStats();
+
+    // Pull XP + GotW from leaderboard endpoint
+    try {
+      const lb = await fetch('/api/leaderboard').then(x => x.json());
+      const me = (lb.leaderboard || []).find(u => u.id === state.viewingUserId);
+      state.xp = me?.stats?.xp ?? 0;
+      state.gotw = {
+        group: lb.group_gotw || null,
+        personal: me?.personal_gotw || null,
+      };
+    } catch {}
+
+    renderStats();
+    renderGotW();
+    renderLedger();
+    setStatus(state.games.length ? 'ok' : 'empty');
+
+    // Check if this user is the weekly XP winner and needs to pick their personal GotW
+    if (state.isOwnProfile) {
+      try {
+        const wr = await fetch(`/api/users/${state.viewingUserId}/xp-winner-status`);
+        const wd = await wr.json();
+        if (wd.is_winner && wd.needs_to_pick) {
+          // Only show modal once per session (avoid annoying repeated prompts)
+          if (!window._winnerModalShown) {
+            window._winnerModalShown = true;
+            openXpWinnerModal(wd);
+          }
+        }
+      } catch (err) { console.error('Winner check failed', err); }
+    }
+  } catch (err) { setStatus('error', err.message); }
+}
+
+// Listen for the global Recalculate XP event to refresh this page
+window.addEventListener('bl:xp-recalculated', () => reload());
+
+// ---------- init ----------
+// If URL has ?view=N, start by viewing that player's ledger (read-only if not yours)
+const urlParams = new URLSearchParams(window.location.search);
+const viewParam = urlParams.get('view');
+if (viewParam) {
+  const targetId = parseInt(viewParam);
+  if (!isNaN(targetId) && targetId !== profile.id) {
+    state.viewingUserId = targetId;
+    state.isOwnProfile = false;
+  }
+}
+loadProfilePicker();
+reload();
+// After picker loads, sync the dropdown UI to actual viewing user
+setTimeout(() => {
+  const sel = $('profile-picker');
+  if (sel && state.viewingUserId !== profile.id) {
+    sel.value = state.viewingUserId;
+    $('readonly-banner').style.display = 'block';
+    const selectedName = [...sel.options].find(o => parseInt(o.value) === state.viewingUserId)?.text;
+    if (selectedName) $('masthead-sub').textContent = `Viewing ${selectedName}'s ledger`;
+  }
+}, 300);
+</script>
+</body>
+</html>

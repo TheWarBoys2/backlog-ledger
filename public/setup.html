@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Setup — The Backlog Ledger</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>Welcome to The Backlog Ledger</h1>
+    <p class="subtitle">First-run setup — this only happens once</p>
+
+    <section class="contract">
+      <div class="contract-text">
+        Before any contract is signed, the office must be furnished. Provide the keys below, and
+        <strong>the ledger shall be opened</strong> for your household. None of this leaves your server —
+        keys, names, and prices remain yours alone.
+      </div>
+    </section>
+
+    <form id="setup-form" class="card" onsubmit="return false;">
+
+      <!-- Group name -->
+      <div class="field">
+        <label for="group_name">Group name</label>
+        <input id="group_name" name="group_name" type="text" placeholder="The Backlog Ledger" value="The Backlog Ledger" />
+        <small>Shown in the header and Discord posts.</small>
+      </div>
+
+      <!-- Steam API key -->
+      <div class="field">
+        <label for="steam_api_key">Steam Web API key <span class="req">*</span></label>
+        <input id="steam_api_key" name="steam_api_key" type="text" placeholder="32-character key" autocomplete="off" required />
+        <small>Get one free at <a href="https://steamcommunity.com/dev/apikey" target="_blank" rel="noopener">steamcommunity.com/dev/apikey</a></small>
+        <div class="test-row">
+          <button type="button" class="btn-test" onclick="testSteam()">Test Steam key</button>
+          <span id="steam-result" class="test-result"></span>
+        </div>
+      </div>
+
+      <!-- Discord bot token -->
+      <div class="field">
+        <label for="discord_bot_token">Discord bot token <span class="req">*</span></label>
+        <input id="discord_bot_token" name="discord_bot_token" type="password" placeholder="Bot token from Discord Developer Portal" autocomplete="off" required />
+        <small>From your bot's "Bot" page on <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">discord.com/developers</a></small>
+      </div>
+
+      <!-- Discord channel ID -->
+      <div class="field">
+        <label for="discord_channel_id">Discord channel ID <span class="req">*</span></label>
+        <input id="discord_channel_id" name="discord_channel_id" type="text" placeholder="18-19 digit channel ID" autocomplete="off" required />
+        <small>Right-click the channel in Discord → "Copy Channel ID" (Developer Mode must be on)</small>
+        <div class="test-row">
+          <button type="button" class="btn-test" onclick="testDiscord(false)">Test connection</button>
+          <button type="button" class="btn-test" onclick="testDiscord(true)">Send test message</button>
+          <span id="discord-result" class="test-result"></span>
+        </div>
+      </div>
+
+      <!-- Admin password -->
+      <div class="field">
+        <label for="admin_password">Admin password <span class="req">*</span></label>
+        <input id="admin_password" name="admin_password" type="password" placeholder="At least 6 characters" autocomplete="new-password" required />
+        <small>Protects the debug page and future admin actions. <strong>Only you need this — don't share it.</strong></small>
+      </div>
+
+      <!-- ITAD API key (optional) -->
+      <div class="field">
+        <label for="itad_api_key">IsThereAnyDeal API key (optional)</label>
+        <input id="itad_api_key" name="itad_api_key" type="text" placeholder="Get one free at isthereanydeal.com/apps/my/" autocomplete="off" />
+        <small>Used to estimate missing prices using historical lowest prices. Without this, the app falls back to Steam's current store price. <a href="https://isthereanydeal.com/apps/my/" target="_blank">Register for a free key here.</a></small>
+      </div>
+
+      <div class="actions">
+        <button type="button" class="btn-primary" onclick="completeSetup()">Complete setup</button>
+        <span id="submit-result" class="test-result"></span>
+      </div>
+    </form>
+  </main>
+
+  <script>
+    function val(id) { return document.getElementById(id).value.trim(); }
+    function showResult(id, ok, msg) {
+      const el = document.getElementById(id);
+      el.textContent = msg;
+      el.className = 'test-result ' + (ok ? 'ok' : 'err');
+    }
+
+    async function testSteam() {
+      showResult('steam-result', true, 'Testing…');
+      try {
+        const res = await fetch('/api/setup/test-steam', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ steam_api_key: val('steam_api_key') })
+        });
+        const data = await res.json();
+        if (data.ok) showResult('steam-result', true, '✓ Steam API key works');
+        else showResult('steam-result', false, '✗ ' + data.error);
+      } catch (err) { showResult('steam-result', false, '✗ ' + err.message); }
+    }
+
+    async function testDiscord(sendMessage) {
+      showResult('discord-result', true, sendMessage ? 'Sending test message…' : 'Testing…');
+      try {
+        const res = await fetch('/api/setup/test-discord', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            discord_bot_token: val('discord_bot_token'),
+            discord_channel_id: val('discord_channel_id'),
+            send_message: sendMessage
+          })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          const msg = `✓ Connected as "${data.bot_name}" to #${data.channel_name}` +
+                      (sendMessage ? ' — message sent!' : '');
+          showResult('discord-result', true, msg);
+        } else showResult('discord-result', false, '✗ ' + data.error);
+      } catch (err) { showResult('discord-result', false, '✗ ' + err.message); }
+    }
+
+    async function completeSetup() {
+      const pw = val('admin_password');
+      if (pw.length < 6) return showResult('submit-result', false, '✗ Password must be at least 6 characters');
+      if (!val('steam_api_key') || !val('discord_bot_token') || !val('discord_channel_id'))
+        return showResult('submit-result', false, '✗ All required fields must be filled');
+
+      showResult('submit-result', true, 'Saving…');
+      try {
+        const res = await fetch('/api/setup/complete', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            group_name: val('group_name'),
+            steam_api_key: val('steam_api_key'),
+            discord_bot_token: val('discord_bot_token'),
+            discord_channel_id: val('discord_channel_id'),
+            admin_password: pw,
+            itad_api_key: val('itad_api_key') || null
+          })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          showResult('submit-result', true, '✓ Setup complete! Redirecting…');
+          setTimeout(() => { window.location.href = '/'; }, 1200);
+        } else showResult('submit-result', false, '✗ ' + (data.error || 'Setup failed'));
+      } catch (err) { showResult('submit-result', false, '✗ ' + err.message); }
+    }
+  </script>
+</body>
+</html>

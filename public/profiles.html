@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Backlog Ledger</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <main class="container">
+    <h1 id="group-title">The Backlog Ledger</h1>
+    <p class="subtitle">Who's playing?</p>
+
+    <section class="contract">
+      <div class="contract-text">
+        Each name holds <strong>a separate accounting</strong>; each ledger its own truth. Pick yours
+        to enter your library, or create a new one to begin keeping the books.
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Select a profile</h2>
+      <div id="profile-list">Loading…</div>
+      <div style="margin-top:1.5rem;">
+        <button class="btn-primary" onclick="toggleCreate()">+ Create new profile</button>
+      </div>
+    </section>
+
+    <section id="create-card" class="card" style="display:none;">
+      <h2>New profile</h2>
+      <div class="field">
+        <label for="display_name">Display name <span class="req">*</span></label>
+        <input id="display_name" type="text" placeholder="Your name on the leaderboard" />
+      </div>
+      <div class="field">
+        <label for="steam_input">Steam ID or vanity URL <span class="req">*</span></label>
+        <input id="steam_input" type="text" placeholder="76561198... or gabelogannewell or full profile URL" />
+        <small>17-digit Steam ID, vanity URL (steamcommunity.com/id/<b>name</b>), or full profile URL.</small>
+        <div class="test-row">
+          <button class="btn-test" onclick="testSteam()">Test Steam ID</button>
+          <span id="steam-result" class="test-result"></span>
+        </div>
+      </div>
+      <div class="field">
+        <label for="discord_user_id">Discord username or ID</label>
+        <input id="discord_user_id" type="text" placeholder="optional — used for @mentions in digest" />
+        <small>For weekly Discord pings. You can paste your Discord user ID (numeric) or username.</small>
+      </div>
+      <div class="actions">
+        <button class="btn-primary" onclick="createProfile()">Create profile</button>
+        <button class="btn-test" onclick="toggleCreate()">Cancel</button>
+        <span id="create-result" class="test-result"></span>
+      </div>
+    </section>
+  </main>
+
+  <script src="/js/app.js"></script>
+  <script>
+    function val(id) { return document.getElementById(id).value.trim(); }
+    function showResult(id, ok, msg) {
+      const el = document.getElementById(id);
+      el.textContent = msg;
+      el.className = 'test-result ' + (ok ? 'ok' : 'err');
+    }
+
+    async function loadGroup() {
+      try {
+        const r = await fetch('/api/group'); const d = await r.json();
+        document.getElementById('group-title').textContent = d.group_name;
+        document.title = d.group_name;
+      } catch {}
+    }
+
+    async function loadProfiles() {
+      const list = document.getElementById('profile-list');
+      try {
+        const r = await fetch('/api/users'); const d = await r.json();
+        if (!d.users || d.users.length === 0) {
+          list.innerHTML = '<p class="muted">No profiles yet. Create the first one below.</p>';
+          return;
+        }
+        list.innerHTML = d.users.map(u => `
+          <div class="profile-row" onclick="selectProfile(${u.id}, '${u.display_name.replace(/'/g,"\\'")}')">
+            <img src="${u.avatar_url || ''}" alt="" class="avatar" onerror="this.style.display='none'" />
+            <div class="profile-info">
+              <strong>${u.display_name}</strong>
+              <small>${u.steam_id || 'no Steam ID'}</small>
+            </div>
+          </div>
+        `).join('');
+      } catch (err) {
+        list.innerHTML = '<p class="err-text">Error loading profiles: ' + err.message + '</p>';
+      }
+    }
+
+    function selectProfile(id, name) {
+      BL.setProfile(id, name);
+      window.location.href = '/index.html';
+    }
+
+    function toggleCreate() {
+      const c = document.getElementById('create-card');
+      c.style.display = c.style.display === 'none' ? 'block' : 'none';
+    }
+
+    async function testSteam() {
+      const input = val('steam_input');
+      if (!input) return showResult('steam-result', false, '✗ Enter a Steam ID or vanity URL');
+      showResult('steam-result', true, 'Testing…');
+      try {
+        const r = await fetch('/api/users/resolve-steam', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ steam_input: input })
+        });
+        const d = await r.json();
+        if (d.ok) showResult('steam-result', true, `✓ Found "${d.persona_name}" (${d.steam_id})`);
+        else showResult('steam-result', false, '✗ ' + d.error);
+      } catch (err) { showResult('steam-result', false, '✗ ' + err.message); }
+    }
+
+    async function createProfile() {
+      const name = val('display_name'), steam = val('steam_input'), discord = val('discord_user_id');
+      if (!name) return showResult('create-result', false, '✗ Display name required');
+      if (!steam) return showResult('create-result', false, '✗ Steam ID required');
+      showResult('create-result', true, 'Creating…');
+      try {
+        const r = await fetch('/api/users', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ display_name:name, steam_input:steam, discord_user_id:discord })
+        });
+        const d = await r.json();
+        if (d.ok) {
+          showResult('create-result', true, '✓ Profile created!');
+          document.getElementById('display_name').value = '';
+          document.getElementById('steam_input').value = '';
+          document.getElementById('discord_user_id').value = '';
+          document.getElementById('steam-result').textContent = '';
+          toggleCreate();
+          loadProfiles();
+        } else showResult('create-result', false, '✗ ' + (d.error || 'Failed'));
+      } catch (err) { showResult('create-result', false, '✗ ' + err.message); }
+    }
+
+    loadGroup();
+    loadProfiles();
+  </script>
+</body>
+</html>

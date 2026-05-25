@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Debug — The Backlog Ledger</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>Debug Dashboard</h1>
+    <p class="subtitle">Admin only</p>
+
+    <!-- Password gate -->
+    <section id="gate" class="card">
+      <h2>Enter admin password</h2>
+      <div class="field">
+        <input id="pw" type="password" placeholder="Admin password" autocomplete="current-password" />
+      </div>
+      <button class="btn-primary" onclick="unlock()">Unlock</button>
+      <span id="gate-result" class="test-result"></span>
+    </section>
+
+    <!-- Dashboard (hidden until unlocked) -->
+    <div id="dashboard" style="display:none;">
+      <section class="card">
+        <h2>Server info</h2>
+        <pre id="info">Loading…</pre>
+      </section>
+
+      <section class="card">
+        <h2>IsThereAnyDeal API key</h2>
+        <p class="muted">Used for historical low price estimation. Get a free key at <a href="https://isthereanydeal.com/apps/my/" target="_blank">isthereanydeal.com/apps/my/</a></p>
+        <div class="field" style="margin-top:12px;">
+          <input id="itad-key" type="text" placeholder="Paste your ITAD API key" />
+        </div>
+        <div class="actions">
+          <button class="btn-primary" onclick="setItadKey()">Save ITAD key</button>
+          <button class="btn-test" onclick="clearItadKey()">Clear key</button>
+          <button class="btn-test" onclick="testItad()">🧪 Test ITAD (BioShock Infinite)</button>
+          <span id="itad-result" class="test-result"></span>
+        </div>
+        <pre id="itad-test-output" class="scroll" style="display:none;margin-top:12px;max-height:300px;overflow:auto;"></pre>
+      </section>
+
+      <section class="card">
+        <h2>Discord weekly digest</h2>
+        <p class="muted">Snapshots: Mondays 9am UTC • Games of the Week pick Wednesdays 6:55pm UTC • Digest auto-posts Wednesdays 7pm UTC</p>
+        <div class="actions" style="margin-top:12px;">
+          <button class="btn-primary" onclick="postDigest()">📜 Post digest now</button>
+          <button class="btn-test" onclick="takeSnapshot()">📸 Take snapshot now</button>
+          <span id="digest-result" class="test-result"></span>
+        </div>
+        <p class="muted small" style="margin-top:10px;">
+          "Post digest now" fires the digest to your Discord channel immediately. This does NOT replace
+          the scheduled Wednesday digest — it's a one-off. "Take snapshot" captures current stats so
+          next digest's "this week's mover" comparison has a baseline.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>Games of the Week</h2>
+        <p class="muted">Use this if the app is set up before the Wednesday weekly push and you want picks immediately.</p>
+        <div class="actions" style="margin-top:12px;">
+          <button class="btn-primary" onclick="pickGotW()">🎯 Pick Games of the Week now</button>
+          <button class="btn-test" onclick="rerollGroupGotW()">🔄 Reroll group game only</button>
+          <span id="gotw-result" class="test-result"></span>
+        </div>
+        <pre id="gotw-details" class="scroll" style="display:none;margin-top:12px;"></pre>
+        <p class="muted small" style="margin-top:10px;">
+          This overwrites the current week's picks. It does not post the digest by itself — use "Post digest now" after this if you want Discord updated too.
+        </p>
+
+        <hr style="margin:18px 0;border:0;border-top:1px solid var(--rule);" />
+
+        <h3>Reroll one player's personal pick</h3>
+        <p class="muted small">Choose a player and reroll their personal Game of the Week randomly from their eligible unpaid contracts.</p>
+        <div class="field">
+          <label for="gotw-user">Player</label>
+          <select id="gotw-user" onchange="loadGotWGamesForSelectedUser()">
+            <option value="">Loading players…</option>
+          </select>
+        </div>
+        <p id="gotw-current" class="muted small"></p>
+        <p id="gotw-pool" class="muted small"></p>
+        <div class="actions" style="margin-top:12px;">
+          <button class="btn-primary" onclick="rerollPersonalGotW()">🎲 Reroll this player's pick</button>
+          <button class="btn-test" onclick="clearPersonalGotW()">Clear pick</button>
+          <span id="gotw-personal-result" class="test-result"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Weekly XP Winner</h2>
+        <p class="muted">The player who gains the most XP each week earns the right to choose their own Personal Game of the Week instead of getting it auto-picked. Auto-determined Wednesday 6:50pm UTC; auto-picked Friday 6pm UTC if the winner doesn't choose.</p>
+        <div id="xp-winner-current" class="muted small" style="margin:0.5rem 0;">Loading…</div>
+        <div class="actions" style="margin-top:12px;">
+          <button class="btn-primary" onclick="determineXpWinner()">🏆 Determine winner now</button>
+          <button class="btn-test" onclick="loadXpWinnerStatus()">Refresh</button>
+          <span id="xp-winner-result" class="test-result"></span>
+        </div>
+        <hr style="margin:18px 0;border:0;border-top:1px solid var(--rule);" />
+        <h3>Override winner</h3>
+        <p class="muted small">Set a specific player as this week's winner. Their auto-pick (if any) will be cleared so they're prompted on next ledger open.</p>
+        <div class="field">
+          <label for="xp-winner-user">Player</label>
+          <select id="xp-winner-user">
+            <option value="">Loading players…</option>
+          </select>
+        </div>
+        <div class="actions" style="margin-top:12px;">
+          <button class="btn-primary" onclick="setXpWinner()">Set as winner</button>
+          <button class="btn-test" onclick="clearXpWinner()">Clear winner for this week</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Recent log lines (latest 50)</h2>
+        <button class="btn-test" onclick="loadLogs()">Refresh</button>
+        <pre id="logs" class="scroll">Loading…</pre>
+      </section>
+
+      <section class="card">
+        <h2>Errors today</h2>
+        <button class="btn-test" onclick="loadErrors()">Refresh</button>
+        <pre id="errors" class="scroll">Loading…</pre>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    let adminPw = '';
+    let gotwUsers = [];
+    let gotwLeaderboard = [];
+    let gotwEligibleGamesByUser = {};
+
+    async function unlock() {
+      const pw = document.getElementById('pw').value;
+      const res = await fetch('/api/admin/verify', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw })
+      });
+      const data = await res.json();
+      const r = document.getElementById('gate-result');
+      if (data.ok) {
+        adminPw = pw;
+        document.getElementById('gate').style.display = 'none';
+        document.getElementById('dashboard').style.display = 'block';
+        loadAll();
+      } else {
+        r.textContent = '✗ Incorrect password';
+        r.className = 'test-result err';
+      }
+    }
+
+    function authHeaders() { return { 'x-admin-password': adminPw, 'Content-Type': 'application/json' }; }
+
+    async function loadInfo() {
+      try {
+        const res = await fetch('/api/debug/info', { headers: authHeaders() });
+        const data = await res.json();
+        document.getElementById('info').textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        document.getElementById('info').textContent = 'Error: ' + err.message;
+      }
+    }
+
+    async function loadLogs() {
+      try {
+        const res = await fetch('/api/debug/logs?lines=50', { headers: authHeaders() });
+        const data = await res.json();
+        document.getElementById('logs').textContent = data.lines.length ? data.lines.join('\n') : '(no log lines yet today)';
+      } catch (err) {
+        document.getElementById('logs').textContent = 'Error: ' + err.message;
+      }
+    }
+
+    async function loadErrors() {
+      try {
+        const res = await fetch('/api/debug/errors', { headers: authHeaders() });
+        const data = await res.json();
+        document.getElementById('errors').textContent = data.lines.length ? data.lines.join('\n') : '✓ No errors today!';
+      } catch (err) {
+        document.getElementById('errors').textContent = 'Error: ' + err.message;
+      }
+    }
+
+    async function postDigest() {
+      const r = document.getElementById('digest-result');
+      r.textContent = 'Posting…'; r.className = 'test-result';
+      try {
+        const res = await fetch('/api/admin/post-digest', { method: 'POST', headers: authHeaders() });
+        const d = await res.json();
+        if (d.ok) { r.textContent = '✓ Digest posted to Discord'; r.className = 'test-result ok'; }
+        else { r.textContent = '✗ ' + (d.error || 'failed'); r.className = 'test-result err'; }
+      } catch (err) {
+        r.textContent = '✗ ' + err.message; r.className = 'test-result err';
+      }
+    }
+
+    async function pickGotW() {
+      const r = document.getElementById('gotw-result');
+      const details = document.getElementById('gotw-details');
+      r.textContent = 'Picking…'; r.className = 'test-result';
+      details.style.display = 'none';
+      details.textContent = '';
+      try {
+        const res = await fetch('/api/admin/pick-gotw', { method: 'POST', headers: authHeaders() });
+        const d = await res.json();
+        if (d.ok) {
+          r.textContent = '✓ Games of the Week picked'; r.className = 'test-result ok';
+          details.textContent = JSON.stringify(d, null, 2);
+          details.style.display = 'block';
+          loadInfo();
+        }
+        else { r.textContent = '✗ ' + (d.error || 'failed'); r.className = 'test-result err'; }
+      } catch (err) {
+        r.textContent = '✗ ' + err.message; r.className = 'test-result err';
+      }
+    }
+
+    async function setItadKey() {
+      const key = document.getElementById('itad-key').value.trim();
+      const r = document.getElementById('itad-result');
+      if (!key) { r.textContent = '✗ Enter a key first'; r.className = 'test-result err'; return; }
+      r.textContent = 'Saving…'; r.className = 'test-result';
+      try {
+        const res = await fetch('/api/admin/set-itad-key', {
+          method: 'POST', headers: authHeaders(),
+          body: JSON.stringify({ itad_api_key: key })
+        });
+        const d = await res.json();
+        if (d.ok) { r.textContent = '✓ ITAD key saved'; r.className = 'test-result ok'; loadItadStatus(); }
+        else { r.textContent = '✗ ' + (d.error || 'failed'); r.className = 'test-result err'; }
+      } catch (err) { r.textContent = '✗ ' + err.message; r.className = 'test-result err'; }
+    }
+
+    async function clearItadKey() {
+      const r = document.getElementById('itad-result');
+      try {
+        const res = await fetch('/api/admin/set-itad-key', {
+          method: 'POST', headers: authHeaders(),
+          body: JSON.stringify({ itad_api_key: null })
+        });
+        const d = await res.json();
+        if (d.ok) { r.textContent = '✓ ITAD key cleared'; r.className = 'test-result ok'; document.getElementById('itad-key').value = ''; loadItadStatus(); }
+        else { r.textContent = '✗ ' + (d.error || 'failed'); r.className = 'test-result err'; }
+      } catch (err) { r.textContent = '✗ ' + err.message; r.className = 'test-result err'; }
+    }
+
+    async function loadItadStatus() {
+      const r = document.getElementById('itad-result');
+      try {
+        const res = await fetch('/api/admin/itad-key-status', { headers: authHeaders() });
+        const d = await res.json();
+        if (d.has_key) {
+          r.textContent = '✓ Key saved: ' + d.masked_key;
+          r.className = 'test-result ok';
+          document.getElementById('itad-key').placeholder = 'Key saved (' + d.masked_key + '). Paste a new one to replace.';
+        } else {
+          r.textContent = 'No key configured — estimates will use Steam current prices';
+          r.className = 'test-result warn';
+          document.getElementById('itad-key').placeholder = 'Paste your ITAD API key';
+        }
+      } catch (err) {
+        r.textContent = '';
+      }
+    }
+
+    async function testItad() {
+      const r = document.getElementById('itad-result');
+      const out = document.getElementById('itad-test-output');
+      r.textContent = 'Testing ITAD API with BioShock Infinite…'; r.className = 'test-result';
+      out.style.display = 'none';
+      try {
+        const res = await fetch('/api/admin/itad-test', { headers: authHeaders() });
+        const d = await res.json();
+        out.textContent = JSON.stringify(d, null, 2);
+        out.style.display = 'block';
+        if (d.ok) { r.textContent = '✓ ITAD API working — see raw output below'; r.className = 'test-result ok'; }
+        else { r.textContent = '✗ ' + (d.error || 'Test failed — see output below'); r.className = 'test-result err'; }
+      } catch (err) {
+        r.textContent = '✗ ' + err.message; r.className = 'test-result err';
+      }
+    }
+
+    async function rerollGroupGotW() {
+      const r = document.getElementById('gotw-result');
+      r.textContent = 'Rerolling group game…'; r.className = 'test-result';
+      try {
+        const res = await fetch('/api/admin/reroll-group-gotw', { method: 'POST', headers: authHeaders() });
+        const d = await res.json();
+        if (d.ok) {
+          r.textContent = '✓ Group game rerolled (app_id: ' + d.group_app_id + ')'; r.className = 'test-result ok';
+          loadGotWControls();
+        }
+        else { r.textContent = '✗ ' + (d.error || 'failed'); r.className = 'test-result err'; }
+      } catch (err) { r.textContent = '✗ ' + err.message; r.className = 'test-result err'; }
+    }
+
+    async function loadGotWControls() {
+      const userSelect = document.getElementById('gotw-user');
+      const current = document.getElementById('gotw-current');
+      const pool = document.getElementById('gotw-pool');
+      try {
+        const [usersRes, boardRes] = await Promise.all([
+          fetch('/api/users', { headers: authHeaders() }),
+          fetch('/api/leaderboard', { headers: authHeaders() }),
+        ]);
+        const usersData = await usersRes.json();
+        const boardData = await boardRes.json();
+        gotwUsers = usersData.users || [];
+        gotwLeaderboard = boardData.leaderboard || [];
+
+        if (!gotwUsers.length) {
+          userSelect.innerHTML = '<option value="">No players found</option>';
+          current.textContent = '';
+          pool.textContent = '';
+          return;
+        }
+
+        userSelect.innerHTML = gotwUsers.map(u => `<option value="${u.id}">${escHtml(u.display_name)}</option>`).join('');
+        await loadGotWGamesForSelectedUser();
+      } catch (err) {
+        userSelect.innerHTML = '<option value="">Could not load players</option>';
+        current.textContent = 'Error: ' + err.message;
+        pool.textContent = '';
+      }
+    }
+
+    async function loadGotWGamesForSelectedUser() {
+      const userId = document.getElementById('gotw-user').value;
+      const current = document.getElementById('gotw-current');
+      const pool = document.getElementById('gotw-pool');
+      const result = document.getElementById('gotw-personal-result');
+      result.textContent = '';
+
+      if (!userId) {
+        current.textContent = '';
+        pool.textContent = '';
+        return;
+      }
+
+      current.textContent = 'Loading current pick…';
+      pool.textContent = 'Loading eligible games…';
+      try {
+        const res = await fetch(`/api/users/${encodeURIComponent(userId)}/games`, { headers: authHeaders() });
+        const data = await res.json();
+        const games = data.games || [];
+        const eligible = games.filter(g => {
+          const price = (g.paid_price_cents || 0) / 100;
+          const hours = (g.playtime_minutes || 0) / 60;
+          return g.play_status !== 'exempt' && g.play_status !== 'free' && price > 0 && hours < price;
+        });
+        gotwEligibleGamesByUser[userId] = eligible;
+
+        const boardUser = gotwLeaderboard.find(u => String(u.id) === String(userId));
+        const currentPick = boardUser?.personal_gotw || null;
+        current.textContent = currentPick
+          ? `Current pick: ${currentPick.name}`
+          : 'Current pick: none';
+        pool.textContent = eligible.length
+          ? `${eligible.length} eligible unpaid contract${eligible.length === 1 ? '' : 's'} available for random reroll.`
+          : 'No eligible unpaid contracts found for this player.';
+      } catch (err) {
+        gotwEligibleGamesByUser[userId] = [];
+        current.textContent = 'Error: ' + err.message;
+        pool.textContent = '';
+      }
+    }
+
+    async function rerollPersonalGotW() {
+      const userId = document.getElementById('gotw-user').value;
+      const r = document.getElementById('gotw-personal-result');
+      if (!userId) {
+        r.textContent = '✗ Pick a player first'; r.className = 'test-result err';
+        return;
+      }
+
+      let eligible = gotwEligibleGamesByUser[userId] || [];
+      if (!eligible.length) {
+        await loadGotWGamesForSelectedUser();
+        eligible = gotwEligibleGamesByUser[userId] || [];
+      }
+      if (!eligible.length) {
+        r.textContent = '✗ No eligible unpaid contracts for this player'; r.className = 'test-result err';
+        return;
+      }
+
+      const boardUser = gotwLeaderboard.find(u => String(u.id) === String(userId));
+      const currentPick = boardUser?.personal_gotw || null;
+      const notCurrent = currentPick ? eligible.filter(g => String(g.app_id) !== String(currentPick.app_id)) : eligible;
+      const pool = notCurrent.length ? notCurrent : eligible;
+      const picked = pool[Math.floor(Math.random() * pool.length)];
+      await savePersonalGotW(userId, picked.app_id);
+    }
+
+    async function clearPersonalGotW() {
+      const userId = document.getElementById('gotw-user').value;
+      await savePersonalGotW(userId, null);
+    }
+
+    async function savePersonalGotW(userId, appId) {
+      const r = document.getElementById('gotw-personal-result');
+      if (!userId) {
+        r.textContent = '✗ Pick a player first'; r.className = 'test-result err';
+        return;
+      }
+      if (appId === null && !confirm('Clear this player\'s personal Game of the Week?')) return;
+
+      r.textContent = appId === null ? 'Clearing…' : 'Rerolling…'; r.className = 'test-result';
+      try {
+        const res = await fetch('/api/admin/set-personal-gotw', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ user_id: Number(userId), app_id: appId === null ? null : Number(appId) }),
+        });
+        const d = await res.json();
+        if (!res.ok || !d.ok) {
+          r.textContent = '✗ ' + (d.error || 'failed'); r.className = 'test-result err';
+          return;
+        }
+        r.textContent = d.cleared ? '✓ Pick cleared' : `✓ ${d.display_name} → ${d.game?.name || 'updated'}`;
+        r.className = 'test-result ok';
+        await loadGotWControls();
+        loadInfo();
+      } catch (err) {
+        r.textContent = '✗ ' + err.message; r.className = 'test-result err';
+      }
+    }
+
+    function escHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    async function takeSnapshot() {
+      const r = document.getElementById('digest-result');
+      r.textContent = 'Snapshotting…'; r.className = 'test-result';
+      try {
+        const res = await fetch('/api/admin/take-snapshot', { method: 'POST', headers: authHeaders() });
+        const d = await res.json();
+        if (d.ok) { r.textContent = `✓ Snapshot saved for ${d.count} players`; r.className = 'test-result ok'; }
+        else { r.textContent = '✗ ' + (d.error || 'failed'); r.className = 'test-result err'; }
+      } catch (err) {
+        r.textContent = '✗ ' + err.message; r.className = 'test-result err';
+      }
+    }
+
+    // ============ XP Winner controls ============
+    async function loadXpWinnerStatus() {
+      const display = document.getElementById('xp-winner-current');
+      try {
+        const r = await fetch('/api/admin/xp-winner', { headers: authHeaders() });
+        const d = await r.json();
+        if (!d.ok) { display.textContent = 'Error: ' + (d.error || 'failed'); return; }
+        if (!d.winner) {
+          display.innerHTML = '<em>No winner for this week yet. Will be auto-determined Wednesday 6:50pm UTC.</em>';
+        } else {
+          const w = d.winner;
+          const name = escHtml(w.user?.display_name || '(unknown)');
+          const xp = (w.xp_gained || 0).toFixed(1);
+          const hrs = (w.hours_gained || 0).toFixed(1);
+          let lines = `<strong>${name}</strong> — ${xp} XP gained, ${hrs}h played.`;
+          if (w.picked_app_id && w.picked_game) {
+            lines += `<br>Picked: <strong>${escHtml(w.picked_game.name)}</strong>`;
+          } else {
+            lines += `<br><em>Hasn't picked yet. Will be prompted on next ledger open.</em>`;
+          }
+          display.innerHTML = lines;
+        }
+        // Populate user dropdown
+        const sel = document.getElementById('xp-winner-user');
+        if (gotwUsers.length && !sel.dataset.populated) {
+          sel.innerHTML = '<option value="">— Choose a player —</option>' +
+            gotwUsers.map(u => `<option value="${u.id}">${escHtml(u.display_name)}</option>`).join('');
+          sel.dataset.populated = '1';
+        }
+      } catch (err) { display.textContent = 'Error: ' + err.message; }
+    }
+
+    async function determineXpWinner() {
+      const r = document.getElementById('xp-winner-result');
+      r.textContent = 'Determining…'; r.className = 'test-result';
+      try {
+        const res = await fetch('/api/admin/determine-xp-winner', { method: 'POST', headers: authHeaders() });
+        const d = await res.json();
+        if (d.ok) {
+          if (d.winner) {
+            r.textContent = `✓ ${d.winner.display_name} (${d.winner.xp_gained.toFixed(1)} XP)`;
+            r.className = 'test-result ok';
+          } else {
+            r.textContent = '✓ No winner this week (no XP gained or no prior snapshot)';
+            r.className = 'test-result ok';
+          }
+          loadXpWinnerStatus();
+        } else {
+          r.textContent = '✗ ' + (d.error || 'failed'); r.className = 'test-result err';
+        }
+      } catch (err) { r.textContent = '✗ ' + err.message; r.className = 'test-result err'; }
+    }
+
+    async function setXpWinner() {
+      const userId = document.getElementById('xp-winner-user').value;
+      const r = document.getElementById('xp-winner-result');
+      if (!userId) { r.textContent = '✗ Pick a player'; r.className = 'test-result err'; return; }
+      r.textContent = 'Saving…'; r.className = 'test-result';
+      try {
+        const res = await fetch('/api/admin/set-xp-winner', {
+          method: 'POST', headers: authHeaders(),
+          body: JSON.stringify({ user_id: Number(userId) })
+        });
+        const d = await res.json();
+        if (d.ok) {
+          r.textContent = `✓ ${d.user.display_name} set as winner`;
+          r.className = 'test-result ok';
+          loadXpWinnerStatus();
+        } else { r.textContent = '✗ ' + (d.error || 'failed'); r.className = 'test-result err'; }
+      } catch (err) { r.textContent = '✗ ' + err.message; r.className = 'test-result err'; }
+    }
+
+    async function clearXpWinner() {
+      if (!confirm('Clear this week\'s XP winner? Their personal pick will revert to auto-pick if you re-run "Pick Games of the Week".')) return;
+      const r = document.getElementById('xp-winner-result');
+      try {
+        const res = await fetch('/api/admin/xp-winner', { method: 'DELETE', headers: authHeaders() });
+        const d = await res.json();
+        if (d.ok) { r.textContent = d.cleared ? '✓ Winner cleared' : '— No winner to clear'; r.className = 'test-result ok'; loadXpWinnerStatus(); }
+        else { r.textContent = '✗ ' + (d.error || 'failed'); r.className = 'test-result err'; }
+      } catch (err) { r.textContent = '✗ ' + err.message; r.className = 'test-result err'; }
+    }
+
+    function loadAll() { loadInfo(); loadLogs(); loadErrors(); loadGotWControls(); loadItadStatus(); loadXpWinnerStatus(); }
+    setInterval(() => { if (adminPw) loadInfo(); }, 10000);
+    document.getElementById('pw').addEventListener('keypress', e => {
+      if (e.key === 'Enter') unlock();
+    });
+  </script>
+</body>
+</html>
