@@ -1,0 +1,19 @@
+{
+  "_comment_": "Manual game title aliases. Keys are LOWERCASE, normalized input names (lower-cased, no punctuation, articles removed, '&' → 'and'). Values are the exact library game name (any case, any punctuation). Edit this file by hand when an import keeps failing for the same game. After editing, restart the app or POST /api/admin/reload-aliases to apply.",
+  "_examples_": "Below are starter entries. Add your own under the same shape.",
+
+  "bioshock remastered": "BioShock",
+  "bioshock 2 remastered": "BioShock 2",
+  "skyrim special edition": "The Elder Scrolls V: Skyrim Special Edition",
+  "skyrim anniversary edition": "The Elder Scrolls V: Skyrim Special Edition",
+  "dark souls remastered": "DARK SOULS™: REMASTERED",
+  "dark souls prepare to die edition": "Dark Souls: Prepare to Die Edition",
+  "fallout 3 game of the year edition": "Fallout 3 - Game of the Year Edition",
+  "doom 2016": "DOOM",
+  "doom 1993": "DOOM (1993)",
+  "doom ii": "DOOM II",
+  "the witcher 3 wild hunt": "The Witcher 3: Wild Hunt",
+  "witcher 3": "The Witcher 3: Wild Hunt",
+  "gta v": "Grand Theft Auto V",
+  "gta 5": "Grand Theft Auto V"
+}
