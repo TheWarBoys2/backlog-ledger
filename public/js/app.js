@@ -196,12 +196,15 @@ const BL = {
 
   async recalculateXp(btn) {
     const original = btn.innerHTML;
+    const adminPassword = window.prompt('Admin password required to sync all profiles and recalculate XP:');
+    if (!adminPassword) return;
     btn.disabled = true;
     btn.innerHTML = '⚡ Syncing…';
     btn.style.opacity = '0.7';
     try {
       const r = await fetch('/api/recalculate-xp', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-admin-password': adminPassword },
         body: JSON.stringify({ sync: true })
       });
       const d = await r.json();

@@ -16,7 +16,7 @@ const DB_PATH = path.join(__dirname, 'backlog.db');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const LOGS_DIR = path.join(__dirname, 'logs');
 const LOG_RETENTION_DAYS = 7;
-const VERSION = '0.4.0';
+const VERSION = require('./package.json').version;
 const SYNC_RATE_LIMIT_MS = 30000; // 30s between syncs per user
 
 // ---------- Logging ----------
@@ -77,7 +77,9 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS user_games (user_id INTEGER NOT NULL, app_id INTEGER NOT NULL,
     playtime_minutes INTEGER DEFAULT 0, playtime_last_2weeks INTEGER DEFAULT 0,
     paid_price_cents INTEGER, play_status TEXT DEFAULT 'unplayed', notes TEXT,
-    manual_override INTEGER DEFAULT 0, completed_at INTEGER, PRIMARY KEY (user_id, app_id),
+    manual_override INTEGER DEFAULT 0, completed_at INTEGER,
+    price_is_estimated INTEGER NOT NULL DEFAULT 0, price_estimate_source TEXT,
+    steam_account_id INTEGER,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (app_id) REFERENCES games(app_id));
   CREATE TABLE IF NOT EXISTS sync_log (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
@@ -85,6 +87,8 @@ const SCHEMA = `
     status TEXT NOT NULL, error_message TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);
   CREATE INDEX IF NOT EXISTS idx_user_games_user ON user_games(user_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_user_games_user_account_app
+    ON user_games(user_id, COALESCE(steam_account_id, 0), app_id);
   CREATE INDEX IF NOT EXISTS idx_sync_log_user ON sync_log(user_id, synced_at);
   CREATE TABLE IF NOT EXISTS pending_prices (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,6 +186,59 @@ try {
   }
 } catch (err) { logger.error('Migration failed', { error: err.message }); }
 
+// Idempotent migration: old builds keyed user_games by (user_id, app_id),
+// which made overlapping games across multiple Steam accounts impossible.
+try {
+  const cols = db.prepare("PRAGMA table_info(user_games)").all();
+  const pkCols = cols.filter(c => c.pk).sort((a, b) => a.pk - b.pk).map(c => c.name);
+  if (pkCols.join(',') === 'user_id,app_id') {
+    db.pragma('foreign_keys = OFF');
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE user_games_new (
+          user_id INTEGER NOT NULL,
+          app_id INTEGER NOT NULL,
+          playtime_minutes INTEGER DEFAULT 0,
+          playtime_last_2weeks INTEGER DEFAULT 0,
+          paid_price_cents INTEGER,
+          play_status TEXT DEFAULT 'unplayed',
+          notes TEXT,
+          manual_override INTEGER DEFAULT 0,
+          completed_at INTEGER,
+          price_is_estimated INTEGER NOT NULL DEFAULT 0,
+          price_estimate_source TEXT,
+          steam_account_id INTEGER,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (app_id) REFERENCES games(app_id)
+        );
+        INSERT INTO user_games_new (
+          user_id, app_id, playtime_minutes, playtime_last_2weeks,
+          paid_price_cents, play_status, notes, manual_override, completed_at,
+          price_is_estimated, price_estimate_source, steam_account_id
+        )
+        SELECT
+          user_id, app_id, playtime_minutes, playtime_last_2weeks,
+          paid_price_cents, play_status, notes, manual_override, completed_at,
+          COALESCE(price_is_estimated, 0), price_estimate_source, steam_account_id
+        FROM user_games;
+        DROP TABLE user_games;
+        ALTER TABLE user_games_new RENAME TO user_games;
+        CREATE INDEX IF NOT EXISTS idx_user_games_user ON user_games(user_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_user_games_user_account_app
+          ON user_games(user_id, COALESCE(steam_account_id, 0), app_id);
+      `);
+    })();
+    db.pragma('foreign_keys = ON');
+    logger.info('Migration: rebuilt user_games with account-aware uniqueness');
+  } else {
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_games_user_account_app
+      ON user_games(user_id, COALESCE(steam_account_id, 0), app_id)`);
+  }
+} catch (err) {
+  try { db.pragma('foreign_keys = ON'); } catch {}
+  logger.error('Account-aware user_games migration failed', { error: err.message });
+}
+
 // Idempotent migration: backfill user_steam_accounts from users.steam_id
 try {
   const usersWithSteam = db.prepare(`SELECT u.id, u.display_name, u.steam_id, u.avatar_url
@@ -227,6 +284,46 @@ function verifyPassword(pw) {
   if (!stored || !pw) return false;
   try { return crypto.timingSafeEqual(Buffer.from(stored, 'hex'), Buffer.from(hashPassword(pw), 'hex')); }
   catch { return false; }
+}
+function accountKey(accountId) {
+  return accountId == null ? 0 : Number(accountId);
+}
+function getPrimarySteamAccountId(userId) {
+  return db.prepare('SELECT id FROM user_steam_accounts WHERE user_id = ? ORDER BY added_at ASC LIMIT 1').get(userId)?.id || null;
+}
+function getCanonicalUserGame(userId, appId, preferredAccountId = null) {
+  if (preferredAccountId) {
+    const preferred = db.prepare(`SELECT * FROM user_games
+      WHERE user_id = ? AND app_id = ? AND steam_account_id = ?`).get(userId, appId, preferredAccountId);
+    if (preferred) return preferred;
+  }
+  return db.prepare(`SELECT * FROM user_games
+    WHERE user_id = ? AND app_id = ?
+    ORDER BY steam_account_id IS NULL DESC,
+      paid_price_cents IS NOT NULL DESC,
+      manual_override DESC,
+      steam_account_id ASC
+    LIMIT 1`).get(userId, appId);
+}
+function clearDuplicateLedgerFields(userId, appId, keepAccountId, fields) {
+  const key = accountKey(keepAccountId);
+  const updates = [];
+  if (fields.price) updates.push('paid_price_cents = NULL', 'price_is_estimated = 0', 'price_estimate_source = NULL');
+  if (fields.status) updates.push("play_status = 'unplayed'", 'completed_at = NULL');
+  if (fields.notes) updates.push('notes = NULL');
+  if (!updates.length) return;
+  db.prepare(`UPDATE user_games SET ${updates.join(', ')}
+    WHERE user_id = ? AND app_id = ? AND COALESCE(steam_account_id, 0) != ?`).run(userId, appId, key);
+}
+function updateCanonicalPrice(userId, appId, cents, isEstimated, source) {
+  const row = getCanonicalUserGame(userId, appId, getPrimarySteamAccountId(userId));
+  if (!row) return 0;
+  const result = db.prepare(`UPDATE user_games
+    SET paid_price_cents = ?, price_is_estimated = ?, price_estimate_source = ?
+    WHERE user_id = ? AND app_id = ? AND COALESCE(steam_account_id, 0) = ?`)
+    .run(cents, isEstimated ? 1 : 0, source || null, userId, appId, accountKey(row.steam_account_id));
+  clearDuplicateLedgerFields(userId, appId, row.steam_account_id, { price: true });
+  return result.changes;
 }
 
 // ---------- Steam helpers (Phase 2/3) ----------
@@ -819,12 +916,19 @@ app.get('/api/users/:id/games', requireSetup, (req, res) => {
 app.patch('/api/users/:id/games/:appId', requireSetup, (req, res) => {
   const userId = parseInt(req.params.id);
   const appId = parseInt(req.params.appId);
-  const existing = db.prepare('SELECT play_status FROM user_games WHERE user_id = ? AND app_id = ? LIMIT 1').get(userId, appId);
+  const existing = getCanonicalUserGame(userId, appId);
   if (!existing) return res.status(404).json({ error: 'Game not in user library' });
 
   const { paid_price_cents, playtime_minutes, play_status, notes, manual_override, completed } = req.body || {};
+  const rowCount = db.prepare('SELECT COUNT(*) AS c FROM user_games WHERE user_id = ? AND app_id = ?').get(userId, appId).c;
+  if (playtime_minutes !== undefined && rowCount > 1) {
+    return res.status(400).json({
+      error: 'Manual playtime edits are disabled for games merged from multiple Steam accounts. Sync the account playtime instead.'
+    });
+  }
   const updates = [];
   const params = [];
+  const cleanup = { price: false, status: false, notes: false };
 
   if (paid_price_cents !== undefined) {
     if (paid_price_cents !== null && (paid_price_cents < 0 || !Number.isFinite(paid_price_cents))) return res.status(400).json({ error: 'Invalid price' });
@@ -832,6 +936,7 @@ app.patch('/api/users/:id/games/:appId', requireSetup, (req, res) => {
     updates.push('paid_price_cents = ?'); params.push(nextPrice);
     updates.push('price_is_estimated = ?'); params.push(0);
     updates.push('price_estimate_source = ?'); params.push(null);
+    cleanup.price = true;
 
     // If a user manually types in a real price for something previously marked
     // Free/Gifted/Complimentary, it should rejoin the normal ledger flow.
@@ -851,21 +956,28 @@ app.patch('/api/users/:id/games/:appId', requireSetup, (req, res) => {
     const valid = ['unplayed', 'playing', 'completed', 'exempt', 'free'];
     if (!valid.includes(play_status)) return res.status(400).json({ error: 'Invalid status' });
     updates.push('play_status = ?'); params.push(play_status);
+    cleanup.status = true;
   }
   if (notes !== undefined) {
     updates.push('notes = ?'); params.push(notes || null);
+    cleanup.notes = true;
   }
   if (manual_override !== undefined) {
     updates.push('manual_override = ?'); params.push(manual_override ? 1 : 0);
   }
   if (completed !== undefined) {
     updates.push('completed_at = ?'); params.push(completed ? Date.now() : null);
+    cleanup.status = true;
   }
 
   if (!updates.length) return res.status(400).json({ error: 'No fields to update' });
 
-  params.push(userId, appId);
-  db.prepare(`UPDATE user_games SET ${updates.join(', ')} WHERE user_id = ? AND app_id = ?`).run(...params);
+  params.push(userId, appId, accountKey(existing.steam_account_id));
+  db.transaction(() => {
+    db.prepare(`UPDATE user_games SET ${updates.join(', ')}
+      WHERE user_id = ? AND app_id = ? AND COALESCE(steam_account_id, 0) = ?`).run(...params);
+    clearDuplicateLedgerFields(userId, appId, existing.steam_account_id, cleanup);
+  })();
   logger.info('Game updated', { user_id: userId, app_id: appId, fields: Object.keys(req.body) });
 
   // Check if this game was the user's personal GotW — if now paid/completed, auto-reroll
@@ -1563,28 +1675,34 @@ app.post('/api/users/:id/import-history', requireSetup, (req, res) => {
   }
 
   let saved = 0, dlc_linked = 0, pending = 0, skipped = 0, preserved = 0;
+  const getImportedGame = db.prepare(`SELECT paid_price_cents FROM user_games
+    WHERE user_id = ? AND app_id = ? AND COALESCE(steam_account_id, 0) = ?`);
+  const updateImportedGame = db.prepare(`UPDATE user_games
+    SET paid_price_cents = ?,
+        price_is_estimated = 0,
+        price_estimate_source = NULL,
+        play_status = CASE WHEN play_status = 'free' AND ? > 0 THEN 'unplayed' ELSE play_status END
+    WHERE user_id = ? AND app_id = ? AND COALESCE(steam_account_id, 0) = ?`);
+  const insertImportedGame = db.prepare(`INSERT INTO user_games
+    (user_id, app_id, paid_price_cents, price_is_estimated, price_estimate_source, play_status, steam_account_id)
+    VALUES (?,?,?,?,NULL,?,?)`);
   db.transaction(() => {
     // Write each unique app_id ONCE with the summed total
     // Re-import safety: take MAX of (current stored price) and (newly imported total)
     // so reimporting doesn't double-count, manual edits aren't lost, but new purchases bump up
     for (const [appId, total] of totals.entries()) {
-      const existing = db.prepare('SELECT paid_price_cents FROM user_games WHERE user_id = ? AND app_id = ?').get(userId, appId);
+      const existing = getImportedGame.get(userId, appId, accountKey(targetAccountId));
       if (existing) {
         const currentVal = existing.paid_price_cents || 0;
         const winner = Math.max(currentVal, total);
         if (winner !== currentVal) {
-          db.prepare(`UPDATE user_games
-            SET paid_price_cents = ?,
-                price_is_estimated = 0,
-                price_estimate_source = NULL,
-                play_status = CASE WHEN play_status = 'free' AND ? > 0 THEN 'unplayed' ELSE play_status END
-            WHERE user_id = ? AND app_id = ?`).run(winner, winner, userId, appId);
+          updateImportedGame.run(winner, winner, userId, appId, accountKey(targetAccountId));
           saved++;
         } else {
           preserved++;
         }
       } else {
-        db.prepare('INSERT INTO user_games (user_id, app_id, paid_price_cents, price_is_estimated, price_estimate_source, play_status, steam_account_id) VALUES (?,?,?,?,NULL,?,?)').run(userId, appId, total, 0, total > 0 ? 'unplayed' : null, targetAccountId);
+        insertImportedGame.run(userId, appId, total, 0, total > 0 ? 'unplayed' : null, targetAccountId);
         saved++;
       }
     }
@@ -1769,9 +1887,7 @@ async function estimatePricesForUser(userId, reEstimate = false) {
         const hist = histMap.get(itadId);
         if (hist && hist.cents > 0) {
           const source = `Historical low: £${(hist.cents / 100).toFixed(2)} at ${hist.shop} (via IsThereAnyDeal)`;
-          db.prepare(`UPDATE user_games SET paid_price_cents = ?, price_is_estimated = 1, price_estimate_source = ?
-            WHERE user_id = ? AND app_id = ?`).run(hist.cents, source, userId, appId);
-          updated++;
+          if (updateCanonicalPrice(userId, appId, hist.cents, true, source) > 0) updated++;
           handledAppIds.add(appId);
         }
       }
@@ -1791,17 +1907,25 @@ async function estimatePricesForUser(userId, reEstimate = false) {
       const entry = data[String(row.app_id)];
       if (!entry?.success || !entry?.data) { failed++; continue; }
       if (entry.data.is_free) {
-        db.prepare(`UPDATE user_games SET play_status = 'free' WHERE user_id = ? AND app_id = ?`).run(userId, row.app_id);
-        markedFree++; continue;
+        const existing = getCanonicalUserGame(userId, row.app_id, getPrimarySteamAccountId(userId));
+        if (existing) {
+          db.transaction(() => {
+            db.prepare(`UPDATE user_games SET play_status = 'free'
+              WHERE user_id = ? AND app_id = ? AND COALESCE(steam_account_id, 0) = ?`)
+              .run(userId, row.app_id, accountKey(existing.steam_account_id));
+            clearDuplicateLedgerFields(userId, row.app_id, existing.steam_account_id, { status: true });
+          })();
+          markedFree++;
+        }
+        continue;
       }
       const po = entry.data.price_overview;
       if (po) {
         const cents = po.final ?? po.initial;
         if (cents && cents > 0) {
           const source = `Current Steam store price: £${(cents / 100).toFixed(2)}`;
-          db.prepare(`UPDATE user_games SET paid_price_cents = ?, price_is_estimated = 1, price_estimate_source = ?
-            WHERE user_id = ? AND app_id = ?`).run(cents, source, userId, row.app_id);
-          updated++; continue;
+          if (updateCanonicalPrice(userId, row.app_id, cents, true, source) > 0) updated++;
+          continue;
         }
       }
       failed++;
@@ -1833,8 +1957,8 @@ app.post('/api/users/:id/resolve-pending', requireSetup, (req, res) => {
   if (!pending_id || !app_id) return res.status(400).json({ error: 'pending_id and app_id required' });
   const pending = db.prepare('SELECT * FROM pending_prices WHERE id = ? AND user_id = ?').get(pending_id, userId);
   if (!pending) return res.status(404).json({ error: 'Pending entry not found' });
-  const exists = db.prepare('SELECT 1 FROM user_games WHERE user_id = ? AND app_id = ?').get(userId, app_id);
-  if (exists) db.prepare('UPDATE user_games SET paid_price_cents = ? WHERE user_id = ? AND app_id = ?').run(pending.paid_price_cents, userId, app_id);
+  const exists = getCanonicalUserGame(userId, app_id, getPrimarySteamAccountId(userId));
+  if (exists) updateCanonicalPrice(userId, app_id, pending.paid_price_cents, false, null);
   else db.prepare('INSERT INTO user_games (user_id, app_id, paid_price_cents) VALUES (?,?,?)').run(userId, app_id, pending.paid_price_cents);
   db.prepare('DELETE FROM pending_prices WHERE id = ?').run(pending_id);
   logger.info('Pending resolved', { user_id: userId, app_id, pending_id });
@@ -1847,7 +1971,7 @@ app.get('/api/users/:id/pending-prices', requireSetup, (req, res) => {
 
 // ---------- Admin/debug ----------
 function requireAdmin(req, res, next) {
-  if (!verifyPassword(req.headers['x-admin-password'] || req.query.password)) return res.status(401).json({ error: 'Admin password required' });
+  if (!verifyPassword(req.headers['x-admin-password'])) return res.status(401).json({ error: 'Admin password required' });
   next();
 }
 app.post('/api/admin/verify', (req, res) => res.json({ ok: verifyPassword(req.body?.password) }));
@@ -2098,9 +2222,10 @@ function computeLeaderboard() {
     let personalGotW = null;
     const personalAppId = gotwPicks?.personal_picks?.[u.id] ?? gotwPicks?.personal_picks?.[String(u.id)];
     if (personalAppId) {
-      const game = db.prepare(`SELECT g.app_id, g.name, ug.playtime_minutes, ug.paid_price_cents
-        FROM games g LEFT JOIN user_games ug ON ug.app_id = g.app_id AND ug.user_id = ?
-        WHERE g.app_id = ?`).get(u.id, personalAppId);
+      const aggregated = rows.find(r => r.app_id === Number(personalAppId));
+      const game = aggregated
+        ? { ...db.prepare('SELECT app_id, name FROM games WHERE app_id = ?').get(personalAppId), ...aggregated }
+        : db.prepare('SELECT app_id, name FROM games WHERE app_id = ?').get(personalAppId);
       if (game) {
         personalGotW = {
           app_id: game.app_id,
@@ -2902,9 +3027,9 @@ app.post('/api/admin/reroll-group-gotw', requireAdmin, (req, res) => {
   }
 });
 
-// Recalculate XP — open to any logged-in user (it's just reading data, no privileged action)
-// Optionally also kicks off a sync for all users so XP reflects fresh Steam data
-app.post('/api/recalculate-xp', requireSetup, async (req, res) => {
+// Recalculate XP and optionally sync all users first. This can contact Steam and
+// mutate sync state, so keep it behind the admin password.
+app.post('/api/recalculate-xp', requireSetup, requireAdmin, async (req, res) => {
   const syncFirst = req.body?.sync !== false; // default true
   const out = { synced: [], errors: [], xp: [] };
   if (syncFirst) {
