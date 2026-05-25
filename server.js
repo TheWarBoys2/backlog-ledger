@@ -8,6 +8,7 @@ const Database = require('better-sqlite3');
 const cron = require('node-cron');
 const crypto = require('crypto');
 const fs = require('fs');
+const http = require('http');
 const path = require('path');
 
 const DEFAULT_PORT = 47821;
@@ -66,6 +67,14 @@ function loadConfig() {
   if (!fs.existsSync(CONFIG_PATH)) return { port: DEFAULT_PORT };
   try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); }
   catch (err) { logger.error('config.json malformed', { error: err.message }); return { port: DEFAULT_PORT }; }
+}
+// Persist a partial update to config.json. The port lives here (not in app_config)
+// because it has to be read before the SQLite database is open.
+function saveConfig(patch) {
+  const current = fs.existsSync(CONFIG_PATH) ? loadConfig() : {};
+  const merged = { ...current, ...patch };
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2) + '\n', 'utf8');
+  return merged;
 }
 const PORT = loadConfig().port || DEFAULT_PORT;
 
@@ -314,6 +323,7 @@ logger.info(`Database ready at ${DB_PATH}`);
 const getConfig = (k) => { const r = db.prepare('SELECT value FROM app_config WHERE key = ?').get(k); return r ? r.value : null; };
 const setConfig = (k, v) => db.prepare(`INSERT INTO app_config (key, value, updated_at) VALUES (?, ?, ?)
   ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`).run(k, v, Date.now());
+const deleteConfig = (k) => db.prepare('DELETE FROM app_config WHERE key = ?').run(k);
 const isSetupComplete = () => !!getConfig('setup_completed_at');
 const hashPassword = (pw) => crypto.scryptSync(pw, 'backlog-ledger-salt', 64).toString('hex');
 function verifyPassword(pw) {
@@ -603,7 +613,32 @@ function uniqueNames(rows) {
   }
   return out;
 }
+function getSteamMetadataPause() {
+  const raw = getConfig('steam_metadata_paused_json');
+  if (!raw) return null;
+  try {
+    const pause = JSON.parse(raw);
+    return pause?.paused_at ? pause : null;
+  } catch { return null; }
+}
+function pauseSteamMetadata(reason, meta = {}) {
+  const pause = {
+    paused_at: Date.now(),
+    reason: reason || 'Steam metadata refresh paused',
+    ...meta,
+  };
+  setConfig('steam_metadata_paused_json', JSON.stringify(pause));
+  return pause;
+}
+function resumeSteamMetadata() {
+  deleteConfig('steam_metadata_paused_json');
+}
 async function refreshSteamMetadataForAppIds(appIds, opts = {}) {
+  const existingPause = getSteamMetadataPause();
+  if (existingPause && !opts.ignorePause) {
+    return { checked: 0, updated: 0, skipped: 0, failed: 0, paused: true, pause: existingPause };
+  }
+
   const ids = [...new Set((appIds || []).map(Number).filter(id => Number.isInteger(id) && id > 0))];
   if (!ids.length) return { checked: 0, updated: 0, skipped: 0, failed: 0 };
 
@@ -651,7 +686,13 @@ async function refreshSteamMetadataForAppIds(appIds, opts = {}) {
         } else if (res.status === 403) {
           forbidden++;
           failed++;
-          logger.warn('Steam metadata request forbidden; stopping refresh to avoid hammering Steam', { app_id: appId, checked: i + 1, remaining: candidates.length - i - 1 });
+          const pause = pauseSteamMetadata('Steam Store returned 403 Forbidden', {
+            app_id: appId,
+            status: 403,
+            checked: i + 1,
+            remaining: candidates.length - i - 1,
+          });
+          logger.warn('Steam metadata request forbidden; paused metadata refresh', { app_id: appId, checked: i + 1, remaining: candidates.length - i - 1, paused_at: pause.paused_at });
           failed += candidates.length - i - 1;
           break;
         } else {
@@ -670,7 +711,7 @@ async function refreshSteamMetadataForAppIds(appIds, opts = {}) {
     if ((i + 1) % 25 === 0) logger.info('Steam metadata refresh progress', { checked: i + 1, total: candidates.length, updated, failed, rate_limited: rateLimited, forbidden });
     if (i + 1 < candidates.length) await new Promise(r => setTimeout(r, 900));
   }
-  return { checked: ids.length, updated, skipped: ids.length - candidates.length, failed, rate_limited: rateLimited, forbidden };
+  return { checked: ids.length, updated, skipped: ids.length - candidates.length, failed, rate_limited: rateLimited, forbidden, paused: !!getSteamMetadataPause() };
 }
 async function testDiscord(token, channelId, sendMessage) {
   try {
@@ -895,7 +936,20 @@ app.get('/health', (req, res) => {
     db_users:db.prepare('SELECT COUNT(*) AS c FROM users').get().c,
     db_games:db.prepare('SELECT COUNT(*) AS c FROM games').get().c });
 });
-app.get('/api/setup/status', (req, res) => res.json({ configured: isSetupComplete() }));
+app.get('/api/setup/status', (req, res) => {
+  // current_port is what the live HTTP server is actually listening on (may be a
+  // boot-time fallback if the configured port was in use). suggested_port is what
+  // the wizard pre-fills (the configured port, or the default). The wizard uses both
+  // so it can warn the user "we're temporarily on X — pick a permanent port below".
+  const cfg = loadConfig();
+  res.json({
+    configured: isSetupComplete(),
+    current_port: ACTIVE_PORT || PORT,
+    default_port: DEFAULT_PORT,
+    suggested_port: cfg.port || DEFAULT_PORT,
+    on_fallback_port: !!(ACTIVE_PORT && ACTIVE_PORT !== (cfg.port || DEFAULT_PORT)),
+  });
+});
 
 app.post('/api/setup/test-steam', async (req, res) => {
   if (!req.body?.steam_api_key) return res.json({ ok:false, error:'API key required' });
@@ -906,23 +960,191 @@ app.post('/api/setup/test-discord', async (req, res) => {
   if (!discord_bot_token || !discord_channel_id) return res.json({ ok:false, error:'Bot token and channel ID required' });
   res.json(await testDiscord(discord_bot_token, discord_channel_id, !!send_message));
 });
-app.post('/api/setup/complete', (req, res) => {
-  if (isSetupComplete()) return res.status(403).json({ error:'Setup already complete' });
-  const { group_name, steam_api_key, discord_bot_token, discord_channel_id, admin_password, itad_api_key } = req.body || {};
-  if (!steam_api_key || !discord_bot_token || !discord_channel_id || !admin_password)
-    return res.status(400).json({ error:'All fields are required' });
-  if (admin_password.length < 6) return res.status(400).json({ error:'Admin password must be at least 6 characters' });
+// Resolve & validate a Steam profile during the wizard (before the API key is persisted).
+// Unguarded by requireSetup because it is part of the first-run flow.
+app.post('/api/setup/test-profile', async (req, res) => {
+  const { steam_api_key, steam_input } = req.body || {};
+  if (!steam_api_key) return res.json({ ok: false, error: 'Steam API key required' });
+  if (!steam_input) return res.json({ ok: false, error: 'Steam profile URL or SteamID64 required' });
+  // resolveSteamId reads the key from app_config; for the wizard we may not have saved it yet,
+  // so we briefly stash it and restore the prior value (if any) afterwards.
+  const prior = getConfig('steam_api_key');
+  setConfig('steam_api_key', steam_api_key);
   try {
-    setConfig('group_name', group_name || 'The Backlog Ledger');
-    setConfig('steam_api_key', steam_api_key);
-    setConfig('discord_bot_token', discord_bot_token);
-    setConfig('discord_channel_id', discord_channel_id);
-    setConfig('admin_password_hash', hashPassword(admin_password));
-    if (itad_api_key) setConfig('itad_api_key', itad_api_key);
-    setConfig('setup_completed_at', String(Date.now()));
-    logger.info('Setup completed successfully');
-    res.json({ ok:true });
-  } catch (err) { logger.error('Setup failed', { error: err.message }); res.status(500).json({ error: err.message }); }
+    const result = await resolveSteamId(steam_input);
+    res.json(result);
+  } finally {
+    if (prior == null) deleteConfig('steam_api_key');
+    else setConfig('steam_api_key', prior);
+  }
+});
+
+// First-run wizard completion.
+// New multi-step payload — see public/setup.html. Legacy single-page fields
+// (discord_bot_token, discord_channel_id, itad_api_key, group_name) remain accepted but optional
+// so they can be configured later via a future Settings page without blocking initial setup.
+app.post('/api/setup/complete', async (req, res) => {
+  if (isSetupComplete()) return res.status(403).json({ error: 'Setup already complete' });
+  const body = req.body || {};
+  const {
+    steam_api_key, admin_password,
+    hosting_mode, port,
+    first_user, first_profile, defaults,
+    // legacy / optional
+    group_name, discord_bot_token, discord_channel_id, itad_api_key
+  } = body;
+
+  if (!steam_api_key) return res.status(400).json({ error: 'Steam API key is required' });
+  if (!admin_password) return res.status(400).json({ error: 'Admin password is required' });
+  if (admin_password.length < 6) return res.status(400).json({ error: 'Admin password must be at least 6 characters' });
+  if (!first_user?.display_name?.trim()) return res.status(400).json({ error: 'A display name for the first user is required' });
+  if (!first_profile?.steam_input?.trim()) return res.status(400).json({ error: 'A Steam profile URL or SteamID64 is required' });
+
+  // Validate the port if supplied. Ports below 1024 require admin/root on most OSes,
+  // and 0/negative/>65535 aren't valid TCP ports — reject them with a friendly message.
+  let chosenPort = null;
+  if (port !== undefined && port !== null && String(port).trim() !== '') {
+    const n = Number(port);
+    if (!Number.isInteger(n) || n < 1 || n > 65535) {
+      return res.status(400).json({ error: 'Port must be a whole number between 1 and 65535' });
+    }
+    if (n < 1024) {
+      return res.status(400).json({ error: 'Pick a port of 1024 or higher (lower ports usually need admin rights)' });
+    }
+    chosenPort = n;
+  }
+
+  // If the user is asking for a port different from the live one, prove it's bindable
+  // BEFORE we save anything. Otherwise we'd save a port the server can't actually take,
+  // close the working listener, and leave the app unreachable.
+  if (chosenPort && chosenPort !== ACTIVE_PORT) {
+    const available = await probePort(chosenPort);
+    if (!available) {
+      return res.status(400).json({
+        error: `Port ${chosenPort} is already in use on this machine. Pick a different one.`,
+      });
+    }
+  }
+
+  const mode = hosting_mode === 'internet' ? 'internet' : 'local';
+
+  // Persist the Steam key first so resolveSteamId() can use it.
+  setConfig('steam_api_key', steam_api_key);
+
+  const resolved = await resolveSteamId(first_profile.steam_input);
+  if (!resolved.ok) {
+    // Roll back the key we just stored so an aborted wizard run doesn't leave half-state behind.
+    deleteConfig('steam_api_key');
+    return res.status(400).json({
+      error: 'Could not look up that Steam profile: ' + resolved.error,
+      hint: 'Possible causes: invalid profile URL or SteamID64, a private Steam profile, an invalid Steam API key, or Steam being temporarily unavailable.'
+    });
+  }
+
+  try {
+    let newUserId;
+    db.transaction(() => {
+      // Persist core settings
+      setConfig('group_name', (group_name || 'The Backlog Ledger').toString().trim() || 'The Backlog Ledger');
+      setConfig('admin_password_hash', hashPassword(admin_password));
+      setConfig('hosting_mode', mode);
+      // Defaults — persisted now for a future Settings page. The current ledger logic
+      // already treats zero-price games as free, so the toggle is informational for now.
+      const currency = (defaults?.currency || 'GBP').toString().toUpperCase().slice(0, 8);
+      setConfig('default_currency', currency);
+      setConfig('treat_no_price_as_free', defaults?.free_no_price === false ? '0' : '1');
+      if (defaults?.min_played_hours != null && Number.isFinite(Number(defaults.min_played_hours))) {
+        setConfig('min_played_hours', String(Number(defaults.min_played_hours)));
+      }
+      // Optional legacy keys
+      if (discord_bot_token) setConfig('discord_bot_token', discord_bot_token);
+      if (discord_channel_id) setConfig('discord_channel_id', discord_channel_id);
+      if (itad_api_key) setConfig('itad_api_key', itad_api_key);
+
+      // Create the first user + primary Steam account row.
+      const displayName = first_user.display_name.trim();
+      const avatarUrl = (first_user.avatar_url || resolved.avatar_url || null);
+      const info = db.prepare(`INSERT INTO users (display_name, steam_id, discord_user_id, avatar_url, created_at)
+        VALUES (?, ?, NULL, ?, ?)`).run(displayName, resolved.steam_id, avatarUrl, Date.now());
+      newUserId = info.lastInsertRowid;
+      const label = (first_profile.label || 'Main').toString().trim() || 'Main';
+      db.prepare(`INSERT INTO user_steam_accounts (user_id, steam_id, label, persona_name, avatar_url, added_at)
+        VALUES (?, ?, ?, ?, ?, ?)`).run(newUserId, resolved.steam_id, label,
+        resolved.persona_name || displayName, resolved.avatar_url || null, Date.now());
+
+      // Mark this user as the owner. There is no admin column yet — this lets a future
+      // Settings/permissions page recognise the original owner.
+      setConfig('owner_user_id', String(newUserId));
+
+      // Flip the first-run flag last so a crash mid-transaction leaves the wizard re-runnable.
+      setConfig('setup_completed_at', String(Date.now()));
+    })();
+    // Persist the chosen port to config.json so future starts pick it up.
+    let portWillSwap = false;
+    if (chosenPort) {
+      try {
+        saveConfig({ port: chosenPort });
+        portWillSwap = chosenPort !== ACTIVE_PORT;
+      } catch (err) {
+        logger.error('Failed to persist port to config.json', { error: err.message });
+        return res.json({
+          ok: true, owner_user_id: newUserId, steam_id: resolved.steam_id,
+          port_save_error: 'Setup finished, but we could not save the port to config.json: ' + err.message,
+          current_port: ACTIVE_PORT,
+        });
+      }
+    }
+
+    logger.info('Setup completed via wizard', {
+      owner_user_id: newUserId, hosting_mode: mode,
+      port: chosenPort, port_will_swap: portWillSwap,
+    });
+
+    // Respond first, THEN swap the listener — so this very response makes it back to
+    // the browser before the old socket is closed. The client uses port_will_swap and
+    // chosen_port to redirect itself to the new URL after a short delay.
+    res.json({
+      ok: true,
+      owner_user_id: newUserId,
+      steam_id: resolved.steam_id,
+      current_port: ACTIVE_PORT,
+      chosen_port: chosenPort,
+      port_will_swap: portWillSwap,
+    });
+
+    if (portWillSwap) {
+      // Give the response a moment to flush, then close the old listener and bind the new one.
+      // We already proved chosenPort is bindable up top, so this should never fail —
+      // but if it does, fall back to the previous port so the app stays reachable.
+      const prevPort = ACTIVE_PORT;
+      setTimeout(() => {
+        logger.info('Swapping HTTP listener', { from: prevPort, to: chosenPort });
+        httpServer.close((closeErr) => {
+          if (closeErr) logger.warn('Error closing old listener', { error: closeErr.message });
+          listenOnPort(httpServer, chosenPort)
+            .then((actual) => {
+              ACTIVE_PORT = actual;
+              logger.info(`Server now listening on port ${actual}`);
+            })
+            .catch(async (err) => {
+              logger.error('Failed to bind new port — falling back to previous', { error: err.message });
+              try {
+                const fallback = await listenOnPort(httpServer, prevPort);
+                ACTIVE_PORT = fallback;
+                logger.info(`Restored previous port ${fallback}`);
+              } catch (fallbackErr) {
+                logger.fatal('Could not restore listener — server is now unreachable', { error: fallbackErr.message });
+              }
+            });
+        });
+      }, 750);
+    }
+  } catch (err) {
+    logger.error('Setup failed', { error: err.message });
+    // Best-effort cleanup so the next attempt starts clean.
+    try { deleteConfig('setup_completed_at'); } catch {}
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/group', (req, res) => res.json({ group_name: getConfig('group_name') || 'The Backlog Ledger', version: VERSION }));
@@ -2417,6 +2639,7 @@ app.get('/api/debug/info', requireAdmin, (req, res) => {
     setup_complete:isSetupComplete(), log_files:fs.readdirSync(LOGS_DIR).sort() });
 });
 app.get('/api/admin/steam-metadata', requireAdmin, (req, res) => {
+  const pause = getSteamMetadataPause();
   const rows = db.prepare(`SELECT g.app_id, g.name, g.steam_metadata_last_synced_at
     FROM games g
     WHERE g.app_id > 0
@@ -2432,10 +2655,14 @@ app.get('/api/admin/steam-metadata', requireAdmin, (req, res) => {
     app_id: r.app_id,
     name: r.name,
     steamMetadataLastSyncedAt: r.steam_metadata_last_synced_at ? new Date(r.steam_metadata_last_synced_at).toISOString() : null,
-  })) });
+  })), paused: !!pause, pause });
 });
 app.post('/api/admin/steam-metadata/refresh', requireAdmin, async (req, res) => {
   try {
+    const pause = getSteamMetadataPause();
+    if (pause && !req.body?.ignore_pause) {
+      return res.status(409).json({ ok: false, paused: true, pause, error: 'Steam metadata refresh is paused. Resume it before refreshing again.' });
+    }
     const appId = req.body?.app_id == null ? null : Number(req.body.app_id);
     const ids = appId
       ? [appId]
@@ -2449,6 +2676,11 @@ app.post('/api/admin/steam-metadata/refresh', requireAdmin, async (req, res) => 
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+app.post('/api/admin/steam-metadata/resume', requireAdmin, (req, res) => {
+  resumeSteamMetadata();
+  logger.info('Steam metadata refresh resumed by admin');
+  res.json({ ok: true, paused: false });
+});
 app.get('/api/debug/logs', requireAdmin, (req, res) => {
   const file = path.join(LOGS_DIR, `app-${todayStamp()}.log`);
   if (!fs.existsSync(file)) return res.json({ lines: [] });
@@ -2461,9 +2693,29 @@ app.get('/api/debug/errors', requireAdmin, (req, res) => {
 });
 
 // ---------- Guards + static ----------
+// First-run guard:
+//  - When setup_completed_at is NOT set, every page request is redirected to the setup wizard
+//    EXCEPT the wizard itself (so we don't loop) and the setup API endpoints.
+//  - Static assets (css/js/images) are always allowed so the wizard can style itself.
+//  - Once setup is complete, "/" serves the normal profiles dashboard as before.
+const SETUP_PATHS = new Set(['/setup', '/setup.html']);
+const ALWAYS_ALLOWED_PREFIXES = ['/api/setup/', '/health', '/style.css', '/js/', '/favicon'];
+function isStaticAsset(p) {
+  return /\.(css|js|png|jpg|jpeg|svg|gif|webp|ico|woff2?|ttf|map)$/i.test(p);
+}
 app.use((req, res, next) => {
-  if (!isSetupComplete() && req.path === '/') return res.sendFile(path.join(PUBLIC_DIR, 'setup.html'));
-  if (isSetupComplete() && req.path === '/') return res.sendFile(path.join(PUBLIC_DIR, 'profiles.html'));
+  const p = req.path;
+  if (!isSetupComplete()) {
+    if (SETUP_PATHS.has(p)) return res.sendFile(path.join(PUBLIC_DIR, 'setup.html'));
+    if (p === '/') return res.redirect(302, '/setup');
+    if (ALWAYS_ALLOWED_PREFIXES.some(pref => p.startsWith(pref))) return next();
+    if (isStaticAsset(p)) return next();
+    // Any other HTML/API request before setup is finished — bounce to wizard.
+    if (req.accepts(['html', 'json']) === 'html') return res.redirect(302, '/setup');
+    return res.status(403).json({ error: 'Setup not complete', redirect: '/setup' });
+  }
+  if (p === '/') return res.sendFile(path.join(PUBLIC_DIR, 'profiles.html'));
+  if (SETUP_PATHS.has(p)) return res.sendFile(path.join(PUBLIC_DIR, 'setup.html'));
   next();
 });
 app.use(express.static(PUBLIC_DIR));
@@ -2490,7 +2742,6 @@ cron.schedule('30 18 * * 3', async () => {
 logger.info('Scheduled weekly sync registered: Wednesdays at 18:30 UTC (GMT)');
 
 // ---------- PHASE 7: Socket.io for real-time leaderboard updates ----------
-const http = require('http');
 const httpServer = http.createServer(app);
 const { Server: SocketServer } = require('socket.io');
 const io = new SocketServer(httpServer, { cors: { origin: '*' } });
@@ -3533,15 +3784,81 @@ logger.info('Scheduled jobs registered: snapshots (Mon 9am UTC), digest (Wed 7pm
 
 
 // ---------- Start ----------
-httpServer.listen(PORT, () => {
+// We track the actual port the server ended up on (which may differ from PORT
+// if 47821 was in use at boot). The wizard reads this via /api/setup/status
+// so first-run users can always reach the installer, even on a busy machine.
+let ACTIVE_PORT = null;
+
+// Probe whether `port` is bindable right now by briefly opening + closing a socket on it.
+// Used to validate a port the wizard wants to switch to BEFORE we close the current listener.
+function probePort(port) {
+  return new Promise((resolve) => {
+    const probe = http.createServer();
+    probe.once('error', (err) => {
+      if (err.code === 'EADDRINUSE') resolve(false);
+      else resolve(false); // any error → treat as unavailable
+    });
+    probe.once('listening', () => {
+      probe.close(() => resolve(true));
+    });
+    try { probe.listen(port); } catch { resolve(false); }
+  });
+}
+
+// Listen on `port`. Rejects with the original error if it's not EADDRINUSE.
+function listenOnPort(server, port) {
+  return new Promise((resolve, reject) => {
+    const onError = (err) => { server.removeListener('listening', onListening); reject(err); };
+    const onListening = () => { server.removeListener('error', onError); resolve(server.address().port); };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(port);
+  });
+}
+
+// Try the preferred port first, walk forward a small range, then let the OS pick.
+// This means a busy 47821 (or whatever the user previously configured) never blocks
+// first-run setup — the user can always reach the wizard and pick a different port.
+async function listenWithFallback(server, preferred) {
+  const tried = [];
+  const candidates = [preferred];
+  for (let i = 1; i <= 9; i++) candidates.push(preferred + i);
+  candidates.push(0); // OS-assigned as the last resort
+  for (const candidate of candidates) {
+    try {
+      const actual = await listenOnPort(server, candidate);
+      return { port: actual, fallback: actual !== preferred, tried };
+    } catch (err) {
+      tried.push({ port: candidate, error: err.code || err.message });
+      if (err.code !== 'EADDRINUSE') throw err;
+    }
+  }
+  throw new Error('Could not find an available port: ' + JSON.stringify(tried));
+}
+
+function logBanner() {
   console.log(`\n╔════════════════════════════════════════════╗`);
   console.log(`║       The Backlog Ledger — v${VERSION}          ║`);
-  console.log(`║  Running at: http://localhost:${PORT}        ║`);
-  console.log(`║  Setup:      ${isSetupComplete() ? 'complete ✓                  ' : 'required (visit URL above) '}║`);
-  console.log(`║  Auto-sync:  Wednesdays 18:30 GMT          ║`);
-  console.log(`║  Real-time:  Socket.io enabled             ║`);
-  console.log(`║  Debug:      /debug.html (needs admin pw)  ║`);
+  console.log(`║  Running at: http://localhost:${ACTIVE_PORT}`);
+  console.log(`║  Setup:      ${isSetupComplete() ? 'complete' : 'required (visit URL above)'}`);
+  if (ACTIVE_PORT !== PORT) {
+    console.log(`║  NOTE:       configured port ${PORT} was in use,`);
+    console.log(`║              fell back to ${ACTIVE_PORT}`);
+  }
   console.log(`╚════════════════════════════════════════════╝\n`);
-  logger.info(`Server listening on port ${PORT}`);
-});
+  logger.info(`Server listening on port ${ACTIVE_PORT}` + (ACTIVE_PORT !== PORT ? ` (fallback from ${PORT})` : ''));
+}
+
+(async () => {
+  try {
+    const result = await listenWithFallback(httpServer, PORT);
+    ACTIVE_PORT = result.port;
+    logBanner();
+  } catch (err) {
+    logger.fatal('Unable to bind to any port', { error: err.message });
+    console.error('FATAL: could not start the server —', err.message);
+    process.exit(1);
+  }
+})();
+
 process.on('SIGINT', () => { logger.info('Shutdown requested'); db.close(); process.exit(0); });
