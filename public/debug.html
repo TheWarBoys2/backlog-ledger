@@ -59,6 +59,18 @@
       </section>
 
       <section class="card">
+        <h2>Steam metadata</h2>
+        <p class="muted">Cached genres and store categories used by Game Finder.</p>
+        <div id="steam-metadata-status" class="muted small" style="margin:0.5rem 0;">Loading…</div>
+        <div class="actions" style="margin-top:12px;">
+          <button class="btn-test" onclick="loadSteamMetadataStatus()">Refresh status</button>
+          <button class="btn-primary" onclick="refreshSteamMetadata()">Refresh all metadata</button>
+          <span id="steam-metadata-result" class="test-result"></span>
+        </div>
+        <pre id="steam-metadata-missing" class="scroll" style="display:none;margin-top:12px;max-height:260px;overflow:auto;"></pre>
+      </section>
+
+      <section class="card">
         <h2>Games of the Week</h2>
         <p class="muted">Use this if the app is set up before the Wednesday weekly push and you want picks immediately.</p>
         <div class="actions" style="margin-top:12px;">
@@ -279,6 +291,42 @@
         out.style.display = 'block';
         if (d.ok) { r.textContent = '✓ ITAD API working — see raw output below'; r.className = 'test-result ok'; }
         else { r.textContent = '✗ ' + (d.error || 'Test failed — see output below'); r.className = 'test-result err'; }
+      } catch (err) {
+        r.textContent = '✗ ' + err.message; r.className = 'test-result err';
+      }
+    }
+
+    async function loadSteamMetadataStatus() {
+      const status = document.getElementById('steam-metadata-status');
+      const out = document.getElementById('steam-metadata-missing');
+      try {
+        const res = await fetch('/api/admin/steam-metadata', { headers: authHeaders() });
+        const d = await res.json();
+        if (!d.ok) throw new Error(d.error || 'failed');
+        const total = d.totals?.total || 0;
+        const synced = d.totals?.synced || 0;
+        const missing = d.totals?.missing || 0;
+        status.textContent = `${synced}/${total} Steam games have cached metadata. ${missing} missing.`;
+        out.textContent = (d.missing || []).map(g => `${g.app_id} — ${g.name}`).join('\n') || 'No missing metadata.';
+        out.style.display = 'block';
+      } catch (err) {
+        status.textContent = 'Error: ' + err.message;
+      }
+    }
+
+    async function refreshSteamMetadata() {
+      if (!confirm('Refresh Steam metadata for every cached Steam game? This may take a while.')) return;
+      const r = document.getElementById('steam-metadata-result');
+      r.textContent = 'Refreshing…'; r.className = 'test-result';
+      try {
+        const res = await fetch('/api/admin/steam-metadata/refresh', {
+          method: 'POST', headers: authHeaders(), body: JSON.stringify({})
+        });
+        const d = await res.json();
+        if (!res.ok || !d.ok) throw new Error(d.error || 'failed');
+        r.textContent = `✓ Updated ${d.updated}, skipped ${d.skipped}, failed ${d.failed}`;
+        r.className = 'test-result ok';
+        loadSteamMetadataStatus();
       } catch (err) {
         r.textContent = '✗ ' + err.message; r.className = 'test-result err';
       }
@@ -529,7 +577,7 @@
       } catch (err) { r.textContent = '✗ ' + err.message; r.className = 'test-result err'; }
     }
 
-    function loadAll() { loadInfo(); loadLogs(); loadErrors(); loadGotWControls(); loadItadStatus(); loadXpWinnerStatus(); }
+    function loadAll() { loadInfo(); loadLogs(); loadErrors(); loadGotWControls(); loadItadStatus(); loadXpWinnerStatus(); loadSteamMetadataStatus(); }
     setInterval(() => { if (adminPw) loadInfo(); }, 10000);
     document.getElementById('pw').addEventListener('keypress', e => {
       if (e.key === 'Enter') unlock();

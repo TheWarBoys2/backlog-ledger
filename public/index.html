@@ -148,6 +148,36 @@
     </div>
   </div>
 
+  <section class="game-finder" id="game-finder">
+    <details>
+      <summary>
+        <span>Game Finder</span>
+        <span class="finder-active-count" id="finder-active-count" style="display:none;">0 active</span>
+      </summary>
+      <div class="finder-body">
+        <div class="finder-field">
+          <label for="genre-filter">Genre</label>
+          <select id="genre-filter" multiple size="5"></select>
+        </div>
+        <div class="finder-field">
+          <label for="category-filter">Steam category / feature</label>
+          <select id="category-filter" multiple size="5"></select>
+        </div>
+        <div class="finder-field finder-quick">
+          <label>Play style</label>
+          <div class="finder-chips" id="quick-filters">
+            <button class="tb-btn finder-chip" type="button" data-quick-filter="solo">Solo</button>
+            <button class="tb-btn finder-chip" type="button" data-quick-filter="localCoop">Local Co-op</button>
+            <button class="tb-btn finder-chip" type="button" data-quick-filter="onlineCoop">Online Co-op</button>
+            <button class="tb-btn finder-chip" type="button" data-quick-filter="localMultiplayer">Local Multiplayer</button>
+            <button class="tb-btn finder-chip" type="button" data-quick-filter="controllerFriendly">Controller Friendly</button>
+          </div>
+          <button class="tb-btn" id="clear-finder" type="button">Clear Game Finder</button>
+        </div>
+      </div>
+    </details>
+  </section>
+
   <!-- ============ THE LEDGER ============ -->
   <main class="ledger" id="ledger">
     <div class="empty-state">Loading your games…</div>
@@ -176,6 +206,30 @@
     <div class="modal-actions">
       <button class="tb-btn" id="notes-cancel">Cancel</button>
       <button class="tb-btn primary" id="notes-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- =============== Manual Game Merge =============== -->
+<div class="modal-bg" id="modal-merge" style="display:none;">
+  <div class="modal">
+    <div class="modal-title">Merged games — <span id="merge-game-name"></span></div>
+    <div class="modal-sub" id="merge-subtitle"></div>
+    <div class="field">
+      <label for="merge-select">Add game</label>
+      <input id="merge-search" type="text" placeholder="Search your ledger..." autocomplete="off" />
+      <select id="merge-select"></select>
+    </div>
+    <div class="field" id="merge-create-primary-field" style="display:none;">
+      <label for="merge-create-primary">Primary game</label>
+      <select id="merge-create-primary"></select>
+    </div>
+    <div id="merge-games-list" class="merge-games-list"></div>
+    <div class="modal-actions">
+      <button class="tb-btn" id="merge-cancel">Close</button>
+      <button class="tb-btn" id="merge-add">Add game</button>
+      <button class="tb-btn primary" id="merge-save">Save primary</button>
+      <button class="tb-btn danger" id="merge-unmerge">Unmerge</button>
     </div>
   </div>
 </div>
@@ -247,7 +301,21 @@ const state = {
   query: '',
   sort: 'pct',
   sortDir: 'desc',
+  finder: {
+    genres: new Set(),
+    categories: new Set(),
+    quick: new Set(),
+  },
   editingNotesAppId: null,
+  editingMergeAppId: null,
+};
+
+const QUICK_FILTERS = {
+  solo: ['single-player', 'single player'],
+  localCoop: ['shared/split screen co-op', 'shared/split screen coop', 'shared/split screen', 'local co-op', 'local coop', 'local cooperative'],
+  onlineCoop: ['online co-op', 'online coop', 'online cooperative', 'co-op online'],
+  localMultiplayer: ['local multiplayer', 'shared/split screen pvp', 'shared/split screen', 'local pvp', 'local multi-player'],
+  controllerFriendly: ['full controller support', 'partial controller support', 'controller support'],
 };
 
 // ---------- formatting (from original) ----------
@@ -300,6 +368,36 @@ function recomputeStats() {
   state.stats = { counts: c, spent, hours, debt, avgPerHr: hours > 0 ? spent / hours : null };
 }
 
+function arr(g, key) {
+  return Array.isArray(g[key]) ? g[key] : [];
+}
+
+function normMeta(s) {
+  return String(s || '').toLowerCase().replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+}
+
+function categoryMatchesQuick(g, quickKey) {
+  const needles = QUICK_FILTERS[quickKey] || [];
+  const cats = arr(g, 'categories').map(normMeta);
+  return needles.some(needle => cats.some(cat => cat.includes(needle)));
+}
+
+function finderActiveCount() {
+  return state.finder.genres.size + state.finder.categories.size + state.finder.quick.size;
+}
+
+function matchesFinder(g) {
+  if (!finderActiveCount()) return true;
+  const genres = arr(g, 'genres');
+  const categories = arr(g, 'categories');
+  if (state.finder.genres.size && !genres.some(x => state.finder.genres.has(x))) return false;
+  if (state.finder.categories.size && !categories.some(x => state.finder.categories.has(x))) return false;
+  for (const quick of state.finder.quick) {
+    if (!categoryMatchesQuick(g, quick)) return false;
+  }
+  return true;
+}
+
 // ---------- visible list (port from original) ----------
 function visibleGames() {
   let list = state.games.slice();
@@ -310,6 +408,7 @@ function visibleGames() {
   else if (state.filter === 'free') list = list.filter(g => g.kind === 'free');
 
   if (state.query) list = list.filter(g => g.lname.includes(state.query));
+  list = list.filter(matchesFinder);
 
   const dir = state.sortDir === 'asc' ? 1 : -1;
   const cmp = {
@@ -349,6 +448,32 @@ function renderStats() {
   $('ms-updated').textContent = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }).toUpperCase();
 }
 
+function renderFinderOptions() {
+  const collect = key => [...new Set(state.games.flatMap(g => arr(g, key)))]
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+  const renderSelect = (id, values, selected) => {
+    const el = $(id);
+    const previous = new Set([...el.selectedOptions].map(o => o.value));
+    const keep = selected || previous;
+    el.innerHTML = values.map(v => `<option value="${escHtml(v)}" ${keep.has(v) ? 'selected' : ''}>${escHtml(v)}</option>`).join('');
+  };
+  renderSelect('genre-filter', collect('genres'), state.finder.genres);
+  renderSelect('category-filter', collect('categories'), state.finder.categories);
+  renderFinderActiveState();
+}
+
+function renderFinderActiveState() {
+  const count = finderActiveCount();
+  const badge = $('finder-active-count');
+  badge.style.display = count ? 'inline-flex' : 'none';
+  badge.textContent = `${count} active`;
+  $('game-finder').classList.toggle('active', count > 0);
+  document.querySelectorAll('.finder-chip').forEach(btn => {
+    btn.classList.toggle('active', state.finder.quick.has(btn.dataset.quickFilter));
+  });
+}
+
 function renderGotW() {
   const strip = $('gotw-strip');
   if (!state.gotw || (!state.gotw.group && !state.gotw.personal)) {
@@ -369,7 +494,7 @@ function renderGotW() {
     items.push(`<div class="gotw-card">
       <div class="gotw-label">🎯 Group Game of the Week</div>
       <div class="gotw-name">${escHtml(g.name)}</div>
-      <div class="gotw-sub">+50% XP for hours played on this title</div>
+      <div class="gotw-sub">Double XP for hours played on this title</div>
       ${settledHtml}
     </div>`);
   }
@@ -379,7 +504,7 @@ function renderGotW() {
     items.push(`<div class="gotw-card">
       <div class="gotw-label">🎲 Your Personal Pick</div>
       <div class="gotw-name">${escHtml(p.name)}</div>
-      <div class="gotw-sub">${p.hours.toFixed(1)}h / £${p.price.toFixed(2)} • +50% XP</div>
+      <div class="gotw-sub">${p.hours.toFixed(1)}h / £${p.price.toFixed(2)} • x2 XP</div>
       ${settledNote}
     </div>`);
   }
@@ -406,13 +531,14 @@ function renderLedger() {
     ledger.querySelectorAll('[data-action="notes"]').forEach(el => el.addEventListener('click', () => openNotesModal(parseInt(el.dataset.appId))));
     ledger.querySelectorAll('[data-action="toggle-exempt"]').forEach(el => el.addEventListener('click', () => toggleExempt(parseInt(el.dataset.appId))));
     ledger.querySelectorAll('[data-action="toggle-complete"]').forEach(el => el.addEventListener('click', () => toggleComplete(parseInt(el.dataset.appId))));
-    ledger.querySelectorAll('[data-action="toggle-breakdown"]').forEach(el => el.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const appId = el.dataset.appId;
-      const panel = document.getElementById('breakdown-' + appId);
-      if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
-    }));
+    ledger.querySelectorAll('[data-action="merge"]').forEach(el => el.addEventListener('click', () => openMergeModal(parseInt(el.dataset.appId))));
   }
+  ledger.querySelectorAll('[data-action="toggle-breakdown"]').forEach(el => el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const panelId = el.dataset.panelId || ('breakdown-' + el.dataset.appId);
+    const panel = document.getElementById(panelId);
+    if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  }));
 }
 
 function renderRow(g) {
@@ -437,7 +563,7 @@ function renderRow(g) {
     ? `<div class="row-icon row-icon-custom">§</div>`
     : `<div class="row-icon"><img src="https://cdn.cloudflare.steamstatic.com/steam/apps/${g.app_id}/capsule_184x69.jpg" alt="" onerror="this.style.visibility='hidden'"></div>`;
   const ro = state.isOwnProfile ? '' : 'readonly tabindex="-1"';
-  const editAttr = state.isOwnProfile ? 'contenteditable="true"' : '';
+  const editAttr = state.isOwnProfile && !g.is_merged ? 'contenteditable="true"' : '';
 
   // Build per-account breakdown HTML when this row has account data and the user has ≥2 accounts
   let breakdownHtml = '';
@@ -457,6 +583,27 @@ function renderRow(g) {
       <div class="breakdown-row total">
         <span class="breakdown-label">Total</span>
         <span class="breakdown-hours">${g.hours.toFixed(1)}h</span>
+        <span class="breakdown-price">£${(g.price || 0).toFixed(2)}</span>
+      </div>
+    </div>`;
+  }
+  if (g.is_merged && Array.isArray(g.merged_games)) {
+    const rows = g.merged_games.map(m => `<div class="breakdown-row">
+      <span class="breakdown-label">${escHtml(m.name)} <small>#${m.app_id}${m.is_primary ? ' primary' : ''}</small></span>
+      <span class="breakdown-hours">${fmtHours((m.playtime_minutes || 0) / 60)}</span>
+      <span class="breakdown-price">£${((m.paid_price_cents || 0) / 100).toFixed(2)}</span>
+    </div>`).join('');
+    badgesHtml += state.isOwnProfile
+      ? ` <span class="account-badge clickable merge-badge" data-action="merge" data-app-id="${g.app_id}" title="Manage merged games">Merged game</span>`
+      : ` <span class="account-badge clickable merge-badge" data-action="toggle-breakdown" data-panel-id="merge-breakdown-${g.app_id}" title="Click for merged game breakdown">Merged game</span>`;
+    badgesHtml += ` <span class="account-badge clickable" data-action="toggle-breakdown" data-panel-id="merge-breakdown-${g.app_id}" title="Click for merged game breakdown">Includes ${g.merged_count || g.merged_games.length} games</span>`;
+    if (g.qualifies_double_xp) badgesHtml += ` <span class="account-badge double-xp-badge" title="This merged group contains a Game of the Week">Double XP</span>`;
+    breakdownHtml += `<div class="account-breakdown" id="merge-breakdown-${g.app_id}" style="display:none;">
+      <div class="breakdown-header">Merged game breakdown</div>
+      ${rows}
+      <div class="breakdown-row total">
+        <span class="breakdown-label">Combined</span>
+        <span class="breakdown-hours">${fmtHours(g.hours)}</span>
         <span class="breakdown-price">£${(g.price || 0).toFixed(2)}</span>
       </div>
     </div>`;
@@ -491,8 +638,9 @@ function renderRow(g) {
     </div>
     ${state.isOwnProfile ? `<div class="row-actions">
       <button class="row-btn" data-action="notes" data-app-id="${g.app_id}" title="Notes">${hasNotes ? '📝' : '✎'}</button>
-      <button class="row-btn" data-action="toggle-exempt" data-app-id="${g.app_id}" title="${kind === 'exempt' ? 'Re-include' : 'Mark exempt'}">${kind === 'exempt' ? '↺' : '×'}</button>
-      ${kind === 'arrears' || kind === 'outstanding' || g.isCompletedToggle ? `<button class="row-btn${completeButtonClass}" data-action="toggle-complete" data-app-id="${g.app_id}" title="${completeButtonTitle}">${completeButtonText}</button>` : ''}
+      ${!g.is_merged ? `<button class="row-btn" data-action="merge" data-app-id="${g.app_id}" title="Merge with another game">+</button>` : ''}
+      ${!g.is_merged ? `<button class="row-btn" data-action="toggle-exempt" data-app-id="${g.app_id}" title="${kind === 'exempt' ? 'Re-include' : 'Mark exempt'}">${kind === 'exempt' ? '↺' : '×'}</button>` : ''}
+      ${!g.is_merged && (kind === 'arrears' || kind === 'outstanding' || g.isCompletedToggle) ? `<button class="row-btn${completeButtonClass}" data-action="toggle-complete" data-app-id="${g.app_id}" title="${completeButtonTitle}">${completeButtonText}</button>` : ''}
     </div>` : ''}
   </article>`;
 }
@@ -623,6 +771,142 @@ $('notes-save').addEventListener('click', async () => {
   await reload();
 });
 
+// ---------- manual merge ----------
+function mergeMembers(g) {
+  return g?.is_merged && Array.isArray(g.merged_games) ? g.merged_games : [g].filter(Boolean);
+}
+
+function renderMergeModal() {
+  const g = state.games.find(x => x.app_id === state.editingMergeAppId);
+  if (!g) return;
+  const members = mergeMembers(g);
+  const memberIds = new Set(members.map(m => Number(m.app_id)));
+  $('merge-game-name').textContent = g.name;
+  $('merge-subtitle').textContent = g.is_merged
+    ? `Includes ${members.length} games. Combined playtime is ${fmtHours(g.hours)}.`
+    : 'Choose another game, then save to create a reversible player-only merge.';
+
+  $('merge-games-list').innerHTML = members.map(m => `
+    <label class="merge-game-row">
+      <input type="radio" name="merge-primary" value="${m.app_id}" ${Number(m.app_id) === Number(g.primary_app_id || g.app_id) ? 'checked' : ''}>
+      <span>
+        <strong>${escHtml(m.name)}</strong>
+        <small>#${m.app_id} · ${fmtHours((m.playtime_minutes || 0) / 60)} · £${((m.paid_price_cents || 0) / 100).toFixed(2)}</small>
+      </span>
+      ${g.is_merged ? `<button type="button" class="row-btn" data-merge-remove="${m.app_id}" title="Remove from merge">×</button>` : ''}
+    </label>`).join('');
+
+  const query = String($('merge-search').value || '').toLowerCase().trim();
+  const candidates = state.games
+    .filter(x => !memberIds.has(Number(x.app_id)))
+    .filter(x => !query || String(x.name || '').toLowerCase().includes(query) || String(x.app_id).includes(query))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  $('merge-select').innerHTML = candidates.length
+    ? candidates.map(x => `<option value="${x.app_id}">${escHtml(x.name)}</option>`).join('')
+    : `<option value="">${query ? 'No games match' : 'No available games'}</option>`;
+  $('merge-create-primary-field').style.display = g.is_merged ? 'none' : '';
+  if (!g.is_merged) {
+    const selectedOther = candidates[0];
+    const primaryOptions = [g, selectedOther].filter(Boolean);
+    $('merge-create-primary').innerHTML = primaryOptions
+      .map(x => `<option value="${x.app_id}">${escHtml(x.name)}</option>`)
+      .join('');
+    $('merge-select').onchange = () => {
+      const other = state.games.find(x => Number(x.app_id) === Number($('merge-select').value));
+      $('merge-create-primary').innerHTML = [g, other].filter(Boolean)
+        .map(x => `<option value="${x.app_id}">${escHtml(x.name)}</option>`)
+        .join('');
+    };
+  } else {
+    $('merge-select').onchange = null;
+  }
+  $('merge-add').disabled = !candidates.length;
+  $('merge-unmerge').style.display = g.is_merged ? '' : 'none';
+  $('merge-games-list').querySelectorAll('[data-merge-remove]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      await runMergeAction(() => updateMerge(g, { removeAppId: Number(btn.dataset.mergeRemove) }));
+    });
+  });
+}
+
+function openMergeModal(appId) {
+  const g = state.games.find(x => x.app_id === appId);
+  if (!g) return;
+  state.editingMergeAppId = appId;
+  $('merge-search').value = '';
+  renderMergeModal();
+  $('modal-merge').style.display = 'flex';
+  setTimeout(() => $('merge-search').focus(), 0);
+}
+
+async function updateMerge(g, payload) {
+  if (g.is_merged) {
+    const r = await fetch(`/api/users/${state.viewingUserId}/merge-groups/${encodeURIComponent(g.merge_group_id)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    });
+    if (!r.ok) throw new Error((await r.json()).error || 'Merge update failed');
+  } else {
+    const other = Number(payload.addAppId || $('merge-select').value);
+    const primary = Number(payload.primaryAppId || $('merge-create-primary').value || g.app_id);
+    const appIds = [...new Set([Number(g.app_id), other])];
+    const r = await fetch(`/api/users/${state.viewingUserId}/merge-groups`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appIds, primaryAppId: appIds.includes(primary) ? primary : g.app_id })
+    });
+    if (!r.ok) throw new Error((await r.json()).error || 'Merge create failed');
+  }
+  await reload();
+  const next = state.games.find(x => x.merge_group_id === g.merge_group_id) || state.games.find(x => x.app_id === state.editingMergeAppId);
+  state.editingMergeAppId = next?.app_id || null;
+  if (state.editingMergeAppId) renderMergeModal();
+  else $('modal-merge').style.display = 'none';
+}
+
+async function runMergeAction(action) {
+  setStatus('saving');
+  try {
+    await action();
+    setStatus('ok');
+  } catch (err) {
+    setStatus('error', err.message || 'Merge update failed');
+    renderMergeModal();
+  }
+}
+
+$('merge-cancel').addEventListener('click', () => { $('modal-merge').style.display = 'none'; state.editingMergeAppId = null; });
+$('modal-merge').addEventListener('click', (e) => { if (e.target.id === 'modal-merge') $('modal-merge').style.display = 'none'; });
+$('merge-search').addEventListener('input', renderMergeModal);
+$('merge-search').addEventListener('keydown', async (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  const g = state.games.find(x => x.app_id === state.editingMergeAppId);
+  if (!g || !$('merge-select').value) return;
+  await runMergeAction(() => updateMerge(g, { addAppId: Number($('merge-select').value) }));
+});
+$('merge-add').addEventListener('click', async () => {
+  const g = state.games.find(x => x.app_id === state.editingMergeAppId);
+  if (!g || !$('merge-select').value) return;
+  await runMergeAction(() => updateMerge(g, { addAppId: Number($('merge-select').value) }));
+});
+$('merge-save').addEventListener('click', async () => {
+  const g = state.games.find(x => x.app_id === state.editingMergeAppId);
+  if (!g) return;
+  const primaryAppId = Number(document.querySelector('input[name="merge-primary"]:checked')?.value || g.app_id);
+  await runMergeAction(() => updateMerge(g, g.is_merged ? { primaryAppId } : { primaryAppId, addAppId: Number($('merge-select').value) }));
+});
+$('merge-unmerge').addEventListener('click', async () => {
+  const g = state.games.find(x => x.app_id === state.editingMergeAppId);
+  if (!g?.is_merged) return;
+  if (!confirm('Unmerge these games for your ledger? Original game data will stay intact.')) return;
+  await runMergeAction(async () => {
+    const r = await fetch(`/api/users/${state.viewingUserId}/merge-groups/${encodeURIComponent(g.merge_group_id)}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error((await r.json()).error || 'Unmerge failed');
+    $('modal-merge').style.display = 'none';
+    state.editingMergeAppId = null;
+    await reload();
+  });
+});
+
 // ---------- XP winner pick modal ----------
 let xpWinnerOptions = [];
 
@@ -660,7 +944,7 @@ function renderXpWinnerOptions(filter) {
     return;
   }
   list.innerHTML = filtered.map(o => `<div class="xp-winner-option" data-app-id="${o.app_id}" style="padding:8px 10px;cursor:pointer;border-radius:4px;display:flex;justify-content:space-between;align-items:center;gap:1rem;">
-    <span><strong>${escHtml(o.name)}</strong></span>
+    <span><strong>${escHtml(o.name)}</strong>${o.is_merged ? ` <span class="account-badge merge-badge">Merged game</span>` : ''}</span>
     <span class="muted" style="font-size:0.85rem;font-family:'JetBrains Mono',monospace;">${o.hours.toFixed(1)}h / £${o.price.toFixed(2)} • £${o.debt.toFixed(2)} debt</span>
   </div>`).join('');
   list.querySelectorAll('.xp-winner-option').forEach(el => {
@@ -762,6 +1046,40 @@ $('sort-dir').addEventListener('click', () => {
   renderLedger();
 });
 
+function selectedValues(selectId) {
+  return new Set([...$(selectId).selectedOptions].map(o => o.value));
+}
+
+$('genre-filter').addEventListener('change', () => {
+  state.finder.genres = selectedValues('genre-filter');
+  renderFinderActiveState();
+  renderLedger();
+});
+
+$('category-filter').addEventListener('change', () => {
+  state.finder.categories = selectedValues('category-filter');
+  renderFinderActiveState();
+  renderLedger();
+});
+
+document.querySelectorAll('.finder-chip').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const key = btn.dataset.quickFilter;
+    if (state.finder.quick.has(key)) state.finder.quick.delete(key);
+    else state.finder.quick.add(key);
+    renderFinderActiveState();
+    renderLedger();
+  });
+});
+
+$('clear-finder').addEventListener('click', () => {
+  state.finder.genres.clear();
+  state.finder.categories.clear();
+  state.finder.quick.clear();
+  renderFinderOptions();
+  renderLedger();
+});
+
 $('btn-sync').addEventListener('click', async () => {
   if (!state.isOwnProfile) { setStatus('error', 'Can only sync your own profile'); return; }
   $('btn-sync').disabled = true;
@@ -825,6 +1143,7 @@ async function reload() {
 
     renderStats();
     renderGotW();
+    renderFinderOptions();
     renderLedger();
     setStatus(state.games.length ? 'ok' : 'empty');
 

@@ -16,8 +16,10 @@ const DB_PATH = path.join(__dirname, 'backlog.db');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const LOGS_DIR = path.join(__dirname, 'logs');
 const LOG_RETENTION_DAYS = 7;
-const VERSION = '0.4.0';
+const VERSION = require('./package.json').version;
 const SYNC_RATE_LIMIT_MS = 30000; // 30s between syncs per user
+const STEAM_METADATA_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const GOTW_XP_MULTIPLIER = 2.0;
 
 // ---------- Logging ----------
 if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
@@ -73,11 +75,14 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, display_name TEXT NOT NULL,
     steam_id TEXT, discord_user_id TEXT, avatar_url TEXT, created_at INTEGER NOT NULL, last_synced_at INTEGER);
   CREATE TABLE IF NOT EXISTS games (app_id INTEGER PRIMARY KEY, name TEXT NOT NULL,
-    store_price_cents INTEGER, store_price_updated_at INTEGER);
+    store_price_cents INTEGER, store_price_updated_at INTEGER,
+    genres_json TEXT, categories_json TEXT, steam_metadata_last_synced_at INTEGER);
   CREATE TABLE IF NOT EXISTS user_games (user_id INTEGER NOT NULL, app_id INTEGER NOT NULL,
     playtime_minutes INTEGER DEFAULT 0, playtime_last_2weeks INTEGER DEFAULT 0,
     paid_price_cents INTEGER, play_status TEXT DEFAULT 'unplayed', notes TEXT,
-    manual_override INTEGER DEFAULT 0, completed_at INTEGER, PRIMARY KEY (user_id, app_id),
+    manual_override INTEGER DEFAULT 0, completed_at INTEGER,
+    price_is_estimated INTEGER NOT NULL DEFAULT 0, price_estimate_source TEXT,
+    steam_account_id INTEGER,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (app_id) REFERENCES games(app_id));
   CREATE TABLE IF NOT EXISTS sync_log (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
@@ -85,6 +90,8 @@ const SCHEMA = `
     status TEXT NOT NULL, error_message TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);
   CREATE INDEX IF NOT EXISTS idx_user_games_user ON user_games(user_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_user_games_user_account_app
+    ON user_games(user_id, COALESCE(steam_account_id, 0), app_id);
   CREATE INDEX IF NOT EXISTS idx_sync_log_user ON sync_log(user_id, synced_at);
   CREATE TABLE IF NOT EXISTS pending_prices (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,6 +146,23 @@ const SCHEMA = `
     group_app_id INTEGER,
     personal_picks_json TEXT NOT NULL,
     picked_at INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS game_merge_groups (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    primary_app_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);
+  CREATE INDEX IF NOT EXISTS idx_merge_groups_user ON game_merge_groups(user_id);
+  CREATE TABLE IF NOT EXISTS game_merge_members (
+    group_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    app_id INTEGER NOT NULL,
+    PRIMARY KEY (user_id, app_id),
+    UNIQUE (group_id, app_id),
+    FOREIGN KEY (group_id) REFERENCES game_merge_groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);
+  CREATE INDEX IF NOT EXISTS idx_merge_members_group ON game_merge_members(group_id);
   CREATE TABLE IF NOT EXISTS user_steam_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -181,6 +205,76 @@ try {
     logger.info('Migration: added steam_account_id column to user_games');
   }
 } catch (err) { logger.error('Migration failed', { error: err.message }); }
+
+// Idempotent migration: cache Steam store metadata on the shared game catalog.
+try {
+  const gameCols = db.prepare("PRAGMA table_info(games)").all();
+  if (!gameCols.some(c => c.name === 'genres_json')) {
+    db.exec('ALTER TABLE games ADD COLUMN genres_json TEXT');
+    logger.info('Migration: added genres_json column to games');
+  }
+  if (!gameCols.some(c => c.name === 'categories_json')) {
+    db.exec('ALTER TABLE games ADD COLUMN categories_json TEXT');
+    logger.info('Migration: added categories_json column to games');
+  }
+  if (!gameCols.some(c => c.name === 'steam_metadata_last_synced_at')) {
+    db.exec('ALTER TABLE games ADD COLUMN steam_metadata_last_synced_at INTEGER');
+    logger.info('Migration: added steam_metadata_last_synced_at column to games');
+  }
+} catch (err) { logger.error('Game metadata migration failed', { error: err.message }); }
+
+// Idempotent migration: old builds keyed user_games by (user_id, app_id),
+// which made overlapping games across multiple Steam accounts impossible.
+try {
+  const cols = db.prepare("PRAGMA table_info(user_games)").all();
+  const pkCols = cols.filter(c => c.pk).sort((a, b) => a.pk - b.pk).map(c => c.name);
+  if (pkCols.join(',') === 'user_id,app_id') {
+    db.pragma('foreign_keys = OFF');
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE user_games_new (
+          user_id INTEGER NOT NULL,
+          app_id INTEGER NOT NULL,
+          playtime_minutes INTEGER DEFAULT 0,
+          playtime_last_2weeks INTEGER DEFAULT 0,
+          paid_price_cents INTEGER,
+          play_status TEXT DEFAULT 'unplayed',
+          notes TEXT,
+          manual_override INTEGER DEFAULT 0,
+          completed_at INTEGER,
+          price_is_estimated INTEGER NOT NULL DEFAULT 0,
+          price_estimate_source TEXT,
+          steam_account_id INTEGER,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY (app_id) REFERENCES games(app_id)
+        );
+        INSERT INTO user_games_new (
+          user_id, app_id, playtime_minutes, playtime_last_2weeks,
+          paid_price_cents, play_status, notes, manual_override, completed_at,
+          price_is_estimated, price_estimate_source, steam_account_id
+        )
+        SELECT
+          user_id, app_id, playtime_minutes, playtime_last_2weeks,
+          paid_price_cents, play_status, notes, manual_override, completed_at,
+          COALESCE(price_is_estimated, 0), price_estimate_source, steam_account_id
+        FROM user_games;
+        DROP TABLE user_games;
+        ALTER TABLE user_games_new RENAME TO user_games;
+        CREATE INDEX IF NOT EXISTS idx_user_games_user ON user_games(user_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_user_games_user_account_app
+          ON user_games(user_id, COALESCE(steam_account_id, 0), app_id);
+      `);
+    })();
+    db.pragma('foreign_keys = ON');
+    logger.info('Migration: rebuilt user_games with account-aware uniqueness');
+  } else {
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_games_user_account_app
+      ON user_games(user_id, COALESCE(steam_account_id, 0), app_id)`);
+  }
+} catch (err) {
+  try { db.pragma('foreign_keys = ON'); } catch {}
+  logger.error('Account-aware user_games migration failed', { error: err.message });
+}
 
 // Idempotent migration: backfill user_steam_accounts from users.steam_id
 try {
@@ -228,6 +322,234 @@ function verifyPassword(pw) {
   try { return crypto.timingSafeEqual(Buffer.from(stored, 'hex'), Buffer.from(hashPassword(pw), 'hex')); }
   catch { return false; }
 }
+function accountKey(accountId) {
+  return accountId == null ? 0 : Number(accountId);
+}
+function getPrimarySteamAccountId(userId) {
+  return db.prepare('SELECT id FROM user_steam_accounts WHERE user_id = ? ORDER BY added_at ASC LIMIT 1').get(userId)?.id || null;
+}
+function getCanonicalUserGame(userId, appId, preferredAccountId = null) {
+  if (preferredAccountId) {
+    const preferred = db.prepare(`SELECT * FROM user_games
+      WHERE user_id = ? AND app_id = ? AND steam_account_id = ?`).get(userId, appId, preferredAccountId);
+    if (preferred) return preferred;
+  }
+  return db.prepare(`SELECT * FROM user_games
+    WHERE user_id = ? AND app_id = ?
+    ORDER BY steam_account_id IS NULL DESC,
+      paid_price_cents IS NOT NULL DESC,
+      manual_override DESC,
+      steam_account_id ASC
+    LIMIT 1`).get(userId, appId);
+}
+function clearDuplicateLedgerFields(userId, appId, keepAccountId, fields) {
+  const key = accountKey(keepAccountId);
+  const updates = [];
+  if (fields.price) updates.push('paid_price_cents = NULL', 'price_is_estimated = 0', 'price_estimate_source = NULL');
+  if (fields.status) updates.push("play_status = 'unplayed'", 'completed_at = NULL');
+  if (fields.notes) updates.push('notes = NULL');
+  if (!updates.length) return;
+  db.prepare(`UPDATE user_games SET ${updates.join(', ')}
+    WHERE user_id = ? AND app_id = ? AND COALESCE(steam_account_id, 0) != ?`).run(userId, appId, key);
+}
+function updateCanonicalPrice(userId, appId, cents, isEstimated, source) {
+  const row = getCanonicalUserGame(userId, appId, getPrimarySteamAccountId(userId));
+  if (!row) return 0;
+  const result = db.prepare(`UPDATE user_games
+    SET paid_price_cents = ?, price_is_estimated = ?, price_estimate_source = ?
+    WHERE user_id = ? AND app_id = ? AND COALESCE(steam_account_id, 0) = ?`)
+    .run(cents, isEstimated ? 1 : 0, source || null, userId, appId, accountKey(row.steam_account_id));
+  clearDuplicateLedgerFields(userId, appId, row.steam_account_id, { price: true });
+  return result.changes;
+}
+
+function mergeStatusPriority(a, b) {
+  if (a === 'completed' || b === 'completed') return 'completed';
+  if (a === 'exempt' || b === 'exempt') return 'exempt';
+  if (a === 'free' || b === 'free') return 'free';
+  return a || b || 'unplayed';
+}
+
+function mergeGameRows(existing, r) {
+  existing.playtime_minutes = (existing.playtime_minutes || 0) + (r.playtime_minutes || 0);
+  existing.playtime_last_2weeks = (existing.playtime_last_2weeks || 0) + (r.playtime_last_2weeks || 0);
+  existing.paid_price_cents = (existing.paid_price_cents || 0) + (r.paid_price_cents || 0);
+  existing.play_status = mergeStatusPriority(existing.play_status, r.play_status);
+  if (r.completed_at && !existing.completed_at) existing.completed_at = r.completed_at;
+  if (r.notes && !existing.notes) existing.notes = r.notes;
+  existing.manual_override = existing.manual_override || r.manual_override;
+  if (r.price_is_estimated) {
+    existing.price_is_estimated = 1;
+    if (r.price_estimate_source && !existing.price_estimate_source) existing.price_estimate_source = r.price_estimate_source;
+  }
+  return existing;
+}
+
+function aggregateUserGamesByApp(userId, includeMeta = false) {
+  const cols = includeMeta
+    ? `g.app_id, g.name, g.genres_json, g.categories_json, g.steam_metadata_last_synced_at,
+       ug.playtime_minutes, ug.playtime_last_2weeks, ug.paid_price_cents, ug.play_status,
+       ug.manual_override, ug.completed_at, ug.notes, COALESCE(ug.price_is_estimated, 0) AS price_is_estimated,
+       ug.price_estimate_source, ug.steam_account_id`
+    : `g.app_id, g.name, ug.playtime_minutes, ug.playtime_last_2weeks, ug.paid_price_cents,
+       ug.play_status, ug.manual_override, ug.completed_at, ug.notes,
+       COALESCE(ug.price_is_estimated, 0) AS price_is_estimated, ug.price_estimate_source`;
+  const raw = db.prepare(`SELECT ${cols}
+    FROM user_games ug JOIN games g ON g.app_id = ug.app_id
+    WHERE ug.user_id = ?`).all(userId);
+  const byApp = new Map();
+  for (const r of raw) {
+    const existing = byApp.get(r.app_id);
+    if (!existing) byApp.set(r.app_id, { ...r });
+    else mergeGameRows(existing, r);
+  }
+  return byApp;
+}
+
+function serialiseMergeGroup(row, members = null) {
+  const groupMembers = members || db.prepare(`SELECT gm.app_id, g.name
+    FROM game_merge_members gm LEFT JOIN games g ON g.app_id = gm.app_id
+    WHERE gm.group_id = ? ORDER BY g.name COLLATE NOCASE`).all(row.id);
+  return {
+    id: row.id,
+    playerId: String(row.user_id),
+    primaryAppId: String(row.primary_app_id),
+    mergedAppIds: groupMembers.map(m => String(m.app_id)),
+    games: groupMembers.map(m => ({ app_id: m.app_id, name: m.name || `App ${m.app_id}` })),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function getMergedGamesForPlayer(playerId) {
+  const groups = db.prepare('SELECT * FROM game_merge_groups WHERE user_id = ? ORDER BY created_at').all(playerId);
+  return groups.map(g => serialiseMergeGroup(g));
+}
+
+function getMergeGroupForGame(playerId, appId) {
+  const row = db.prepare(`SELECT g.* FROM game_merge_groups g
+    JOIN game_merge_members m ON m.group_id = g.id
+    WHERE m.user_id = ? AND m.app_id = ?`).get(playerId, appId);
+  return row ? serialiseMergeGroup(row) : null;
+}
+
+function getPrimaryGameForMergeGroup(group) {
+  const appId = Number(group.primaryAppId || group.primary_app_id);
+  return db.prepare('SELECT app_id, name FROM games WHERE app_id = ?').get(appId) || null;
+}
+
+function isGameInSameMergeGroup(playerId, appIdA, appIdB) {
+  if (Number(appIdA) === Number(appIdB)) return true;
+  const group = getMergeGroupForGame(playerId, appIdA);
+  return !!group && group.mergedAppIds.map(Number).includes(Number(appIdB));
+}
+
+function doesMergeGroupContainDoubleXpGame(playerId, mergeGroup) {
+  const gotw = getCurrentGotWPicks();
+  const personal = gotw?.personal_picks?.[playerId] ?? gotw?.personal_picks?.[String(playerId)];
+  const ids = (mergeGroup.mergedAppIds || []).map(Number);
+  return (gotw?.group_app_id && ids.includes(Number(gotw.group_app_id))) ||
+    (personal && ids.includes(Number(personal)));
+}
+
+function qualifiesForDoubleXp(playerId, playedAppId, doubleXpAppId) {
+  // Manual merge acceptance scenario:
+  // Metro Exodus (412020) + Metro Exodus Enhanced Edition (1449560) can be
+  // merged per player. If 412020 is GotW/Double XP and the player adds time
+  // to 1449560, this helper makes the XP receipt award x2 XP for that play.
+  // The effective ledger row remains one visible merged contract with a member
+  // breakdown, and GotW pools see only that one effective contract.
+  if (!doubleXpAppId) return false;
+  if (Number(playedAppId) === Number(doubleXpAppId)) return true;
+  return isGameInSameMergeGroup(playerId, playedAppId, doubleXpAppId);
+}
+
+function isUnpaidContractRow(row) {
+  if (!row || row.play_status === 'exempt' || row.play_status === 'free' || row.play_status === 'completed') return false;
+  const price = (row.paid_price_cents || 0) / 100;
+  const hours = (row.playtime_minutes || 0) / 60;
+  return price > 0 && hours < price;
+}
+
+function applyMergeGroupsToGameMap(playerId, byApp, opts = {}) {
+  const groups = db.prepare('SELECT * FROM game_merge_groups WHERE user_id = ?').all(playerId);
+  if (!groups.length) return [...byApp.values()];
+  const groupRows = [];
+  const consumed = new Set();
+  const gotw = opts.gotwPicks || null;
+  const personal = gotw ? (gotw.personal_picks?.[playerId] ?? gotw.personal_picks?.[String(playerId)]) : null;
+
+  for (const group of groups) {
+    const members = db.prepare(`SELECT gm.app_id, g.name FROM game_merge_members gm
+      LEFT JOIN games g ON g.app_id = gm.app_id WHERE gm.group_id = ?`).all(group.id);
+    const presentMembers = members.filter(m => byApp.has(m.app_id));
+    if (presentMembers.length < 2) continue;
+    const primary = byApp.get(group.primary_app_id) || byApp.get(presentMembers[0].app_id);
+    const merged = {
+      ...primary,
+      app_id: primary.app_id,
+      name: primary.name,
+      merge_group_id: group.id,
+      is_merged: true,
+      primary_app_id: group.primary_app_id,
+      merged_app_ids: members.map(m => m.app_id),
+      merged_count: presentMembers.length,
+      merged_games: presentMembers.map(m => ({ ...byApp.get(m.app_id), is_primary: m.app_id === group.primary_app_id })),
+      playtime_minutes: 0,
+      playtime_last_2weeks: 0,
+      paid_price_cents: 0,
+      play_status: 'unplayed',
+      manual_override: 0,
+      completed_at: null,
+      notes: null,
+      price_is_estimated: 0,
+      price_estimate_source: null,
+      steam_accounts: [],
+      account_breakdown: [],
+      qualifies_double_xp: false,
+    };
+    for (const m of presentMembers) {
+      consumed.add(m.app_id);
+      const memberRow = byApp.get(m.app_id);
+      mergeGameRows(merged, memberRow);
+      if (Array.isArray(memberRow.steam_accounts)) {
+        for (const account of memberRow.steam_accounts) {
+          if (!merged.steam_accounts.some(a => a.id === account.id)) merged.steam_accounts.push(account);
+        }
+      }
+      if (Array.isArray(memberRow.account_breakdown)) {
+        for (const entry of memberRow.account_breakdown) merged.account_breakdown.push({ ...entry, app_id: m.app_id, game_name: memberRow.name });
+      }
+    }
+    // Manual merge groups are one ledger contract with multiple playable app IDs.
+    // Default contract price/status to the primary game so free enhanced editions
+    // and remasters do not inflate debt. TODO: add an explicit pricing_mode if
+    // groups later need to opt into summed member prices.
+    merged.paid_price_cents = primary.paid_price_cents || 0;
+    merged.play_status = primary.play_status || 'unplayed';
+    merged.completed_at = primary.completed_at || null;
+    merged.notes = primary.notes || null;
+    merged.manual_override = primary.manual_override || 0;
+    merged.price_is_estimated = primary.price_is_estimated || 0;
+    merged.price_estimate_source = primary.price_estimate_source || null;
+    if (gotw) {
+      merged.qualifies_double_xp = members.some(m =>
+        qualifiesForDoubleXp(playerId, m.app_id, gotw.group_app_id) ||
+        qualifiesForDoubleXp(playerId, m.app_id, personal)
+      );
+    }
+    groupRows.push(merged);
+  }
+
+  for (const r of byApp.values()) {
+    if (!consumed.has(r.app_id)) groupRows.push(r);
+  }
+  return groupRows;
+}
+
+function getEffectiveLedgerEntriesForPlayer(playerId, opts = {}) {
+  return applyMergeGroupsToGameMap(playerId, aggregateUserGamesByApp(playerId, !!opts.includeMeta), opts);
+}
 
 // ---------- Steam helpers (Phase 2/3) ----------
 async function testSteamKey(apiKey) {
@@ -261,6 +583,95 @@ async function fetchSteamProfile(steamId, apiKey) {
     return { ok: true, steam_id: steamId, persona_name: player.personaname, avatar_url: player.avatarmedium };
   } catch (err) { return { ok: false, error: err.message }; }
 }
+function parseJsonArray(value) {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter(Boolean).map(String) : [];
+  } catch { return []; }
+}
+function uniqueNames(rows) {
+  const seen = new Set();
+  const out = [];
+  for (const r of rows || []) {
+    const name = String(r?.description || '').trim();
+    const key = name.toLowerCase();
+    if (name && !seen.has(key)) {
+      seen.add(key);
+      out.push(name);
+    }
+  }
+  return out;
+}
+async function refreshSteamMetadataForAppIds(appIds, opts = {}) {
+  const ids = [...new Set((appIds || []).map(Number).filter(id => Number.isInteger(id) && id > 0))];
+  if (!ids.length) return { checked: 0, updated: 0, skipped: 0, failed: 0 };
+
+  const now = Date.now();
+  const force = !!opts.force;
+  const placeholders = ids.map(() => '?').join(',');
+  const existing = db.prepare(`SELECT app_id, genres_json, categories_json, steam_metadata_last_synced_at
+    FROM games WHERE app_id IN (${placeholders})`).all(...ids);
+  const existingById = new Map(existing.map(r => [r.app_id, r]));
+  const candidates = ids.filter(id => {
+    const row = existingById.get(id);
+    if (!row) return false;
+    if (force) return true;
+    if (!row.steam_metadata_last_synced_at) return true;
+    if (!row.genres_json || !row.categories_json) return true;
+    return now - row.steam_metadata_last_synced_at > STEAM_METADATA_TTL_MS;
+  });
+  if (!candidates.length) return { checked: ids.length, updated: 0, skipped: ids.length, failed: 0 };
+
+  const update = db.prepare(`UPDATE games
+    SET genres_json = ?, categories_json = ?, steam_metadata_last_synced_at = ?
+    WHERE app_id = ?`);
+  const saveEntry = (appId, entry) => {
+    if (!entry?.success || !entry?.data) return false;
+    update.run(
+      JSON.stringify(uniqueNames(entry.data.genres)),
+      JSON.stringify(uniqueNames(entry.data.categories)),
+      now,
+      appId
+    );
+    return true;
+  };
+  let updated = 0, failed = 0, rateLimited = 0, forbidden = 0;
+  for (let i = 0; i < candidates.length; i++) {
+    const appId = candidates[i];
+    try {
+      const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=gb&l=english`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        if (res.status === 429) {
+          rateLimited++;
+          logger.warn('Steam metadata refresh paused by rate limit', { app_id: appId, checked: i + 1, remaining: candidates.length - i - 1 });
+          await new Promise(r => setTimeout(r, 5000));
+          failed++;
+        } else if (res.status === 403) {
+          forbidden++;
+          failed++;
+          logger.warn('Steam metadata request forbidden; stopping refresh to avoid hammering Steam', { app_id: appId, checked: i + 1, remaining: candidates.length - i - 1 });
+          failed += candidates.length - i - 1;
+          break;
+        } else {
+          failed++;
+          logger.warn('Steam metadata request failed', { app_id: appId, status: res.status });
+        }
+      } else {
+        const data = await res.json();
+        if (saveEntry(appId, data?.[String(appId)])) updated++;
+        else failed++;
+      }
+    } catch (err) {
+      failed++;
+      logger.warn('Steam metadata refresh failed', { app_id: appId, error: err.message });
+    }
+    if ((i + 1) % 25 === 0) logger.info('Steam metadata refresh progress', { checked: i + 1, total: candidates.length, updated, failed, rate_limited: rateLimited, forbidden });
+    if (i + 1 < candidates.length) await new Promise(r => setTimeout(r, 900));
+  }
+  return { checked: ids.length, updated, skipped: ids.length - candidates.length, failed, rate_limited: rateLimited, forbidden };
+}
 async function testDiscord(token, channelId, sendMessage) {
   try {
     const headers = { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' };
@@ -281,7 +692,7 @@ async function testDiscord(token, channelId, sendMessage) {
 
 // ---------- PHASE 4: Steam library sync ----------
 // Sync one specific Steam account (by user_steam_accounts.id)
-async function syncSteamAccount(accountId) {
+async function syncSteamAccount(accountId, opts = {}) {
   const account = db.prepare('SELECT * FROM user_steam_accounts WHERE id = ?').get(accountId);
   if (!account) return { ok: false, error: 'Steam account not found' };
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(account.user_id);
@@ -424,36 +835,46 @@ async function syncSteamAccount(accountId) {
   });
   txn();
 
+  let metadata = { checked: 0, updated: 0, skipped: 0, failed: 0 };
+  try {
+    metadata = await refreshSteamMetadataForAppIds(games.map(g => g.appid), { force: !!opts.refreshMetadata });
+  } catch (err) {
+    metadata.failed = games.length;
+    logger.warn('Steam metadata refresh did not complete', { user_id: userId, account_id: accountId, error: err.message });
+  }
+
   const elapsed = Date.now() - startedAt;
-  logger.info('Sync complete', { user_id: userId, account_id: accountId, label: accountLabel, added, updated, skipped, total: games.length, ms: elapsed, baselines_set: baselinesSet, baselines_bumped: baselinesBumped, baselines_restored: restoredBaselines });
+  logger.info('Sync complete', { user_id: userId, account_id: accountId, label: accountLabel, added, updated, skipped, total: games.length, ms: elapsed, baselines_set: baselinesSet, baselines_bumped: baselinesBumped, baselines_restored: restoredBaselines, metadata });
   setImmediate(() => {
     if (app && app.locals && app.locals.broadcastLeaderboardUpdate) {
       app.locals.broadcastLeaderboardUpdate(userId, 'sync');
     }
   });
-  return { ok: true, added, updated, skipped, total: games.length, elapsed_ms: elapsed, account_label: accountLabel };
+  return { ok: true, added, updated, skipped, total: games.length, elapsed_ms: elapsed, account_label: accountLabel, metadata };
 }
 
 // Sync ALL of a user's linked Steam accounts. Returns aggregate result.
-async function syncUserLibrary(userId) {
+async function syncUserLibrary(userId, opts = {}) {
   const accounts = db.prepare('SELECT id, label FROM user_steam_accounts WHERE user_id = ?').all(userId);
   if (!accounts.length) return { ok: false, error: 'User has no Steam accounts linked. Add one in profile settings.' };
 
   const results = [];
   let totalAdded = 0, totalUpdated = 0, totalSkipped = 0;
+  const metadata = { checked: 0, updated: 0, skipped: 0, failed: 0 };
   for (const acc of accounts) {
-    const result = await syncSteamAccount(acc.id);
+    const result = await syncSteamAccount(acc.id, opts);
     results.push({ account_id: acc.id, label: acc.label || 'Account', ...result });
     if (result.ok) {
       totalAdded += result.added || 0;
       totalUpdated += result.updated || 0;
       totalSkipped += result.skipped || 0;
+      for (const key of Object.keys(metadata)) metadata[key] += result.metadata?.[key] || 0;
     }
     // Be polite to Steam API between accounts
     if (accounts.length > 1) await new Promise(r => setTimeout(r, 500));
   }
   const anyOk = results.some(r => r.ok);
-  return { ok: anyOk, added: totalAdded, updated: totalUpdated, skipped: totalSkipped, accounts: results };
+  return { ok: anyOk, added: totalAdded, updated: totalUpdated, skipped: totalSkipped, metadata, accounts: results };
 }
 
 // ---------- Express ----------
@@ -691,7 +1112,7 @@ app.post('/api/users/:id/steam-accounts/:accountId/sync', requireSetup, async (r
   const account = db.prepare('SELECT id FROM user_steam_accounts WHERE id = ? AND user_id = ?').get(accountId, userId);
   if (!account) return res.status(404).json({ error: 'Steam account not found' });
   try {
-    const result = await syncSteamAccount(accountId);
+    const result = await syncSteamAccount(accountId, { refreshMetadata: !!req.body?.refresh_metadata });
     res.json(result);
   } catch (err) {
     logger.error('Single account sync failed', { error: err.message });
@@ -711,7 +1132,7 @@ app.post('/api/users/:id/sync', requireSetup, async (req, res) => {
     return res.status(429).json({ error: `Please wait ${wait}s before syncing again` });
   }
 
-  const result = await syncUserLibrary(userId);
+  const result = await syncUserLibrary(userId, { refreshMetadata: !!req.body?.refresh_metadata });
   if (!result.ok) return res.status(400).json(result);
   res.json(result);
 });
@@ -724,7 +1145,8 @@ app.get('/api/users/:id/games', requireSetup, (req, res) => {
   for (const a of accounts) accountById.set(a.id, a);
 
   // Load raw rows (may have duplicates across accounts)
-  const raw = db.prepare(`SELECT g.app_id, g.name, ug.playtime_minutes, ug.playtime_last_2weeks,
+  const raw = db.prepare(`SELECT g.app_id, g.name, g.genres_json, g.categories_json,
+    g.steam_metadata_last_synced_at, ug.playtime_minutes, ug.playtime_last_2weeks,
     ug.paid_price_cents, ug.play_status, ug.manual_override, ug.completed_at, ug.notes,
     COALESCE(ug.price_is_estimated, 0) AS price_is_estimated,
     ug.price_estimate_source, ug.steam_account_id
@@ -748,6 +1170,12 @@ app.get('/api/users/:id/games', requireSetup, (req, res) => {
     if (!existing) {
       byAppId.set(r.app_id, {
         ...r,
+        genres: parseJsonArray(r.genres_json),
+        categories: parseJsonArray(r.categories_json),
+        steamMetadataLastSyncedAt: r.steam_metadata_last_synced_at ? new Date(r.steam_metadata_last_synced_at).toISOString() : null,
+        genres_json: undefined,
+        categories_json: undefined,
+        steam_metadata_last_synced_at: undefined,
         steam_accounts: accLabel ? [{ id: r.steam_account_id, label: accLabel }] : [],
         account_breakdown: [accBreakdownEntry],
       });
@@ -778,7 +1206,7 @@ app.get('/api/users/:id/games', requireSetup, (req, res) => {
       existing.account_breakdown.push(accBreakdownEntry);
     }
   }
-  const rows = [...byAppId.values()];
+  const rows = applyMergeGroupsToGameMap(userId, byAppId, { gotwPicks: getCurrentGotWPicks() });
 
   // Compute "contract" stats per the original Ledger's model
   let totalSpent = 0, totalHours = 0, totalDebt = 0;
@@ -815,16 +1243,120 @@ app.get('/api/users/:id/games', requireSetup, (req, res) => {
   });
 });
 
+app.get('/api/users/:id/merge-groups', requireSetup, (req, res) => {
+  const userId = parseInt(req.params.id);
+  if (!db.prepare('SELECT id FROM users WHERE id = ?').get(userId)) return res.status(404).json({ error: 'Profile not found' });
+  res.json({ ok: true, merge_groups: getMergedGamesForPlayer(userId) });
+});
+
+function normaliseMergeAppIds(raw) {
+  return [...new Set((raw || []).map(Number).filter(id => Number.isInteger(id)))];
+}
+
+function validateMergeApps(userId, appIds, groupId = null) {
+  if (appIds.length < 2) return 'Choose at least two games to merge';
+  const placeholders = appIds.map(() => '?').join(',');
+  const owned = db.prepare(`SELECT DISTINCT app_id FROM user_games WHERE user_id = ? AND app_id IN (${placeholders})`)
+    .all(userId, ...appIds).map(r => r.app_id);
+  if (owned.length !== appIds.length) return 'Every merged game must already be in this player library';
+  const existing = db.prepare(`SELECT app_id, group_id FROM game_merge_members
+    WHERE user_id = ? AND app_id IN (${placeholders})`).all(userId, ...appIds);
+  const conflict = existing.find(r => !groupId || r.group_id !== groupId);
+  if (conflict) return `App ${conflict.app_id} is already in another merge group`;
+  return null;
+}
+
+app.post('/api/users/:id/merge-groups', requireSetup, (req, res) => {
+  const userId = parseInt(req.params.id);
+  if (!db.prepare('SELECT id FROM users WHERE id = ?').get(userId)) return res.status(404).json({ error: 'Profile not found' });
+  const appIds = normaliseMergeAppIds(req.body?.appIds || req.body?.mergedAppIds);
+  const primaryAppId = Number(req.body?.primaryAppId || req.body?.primary_app_id || appIds[0]);
+  if (!appIds.includes(primaryAppId)) return res.status(400).json({ error: 'Primary game must be in the merge group' });
+  const validation = validateMergeApps(userId, appIds);
+  if (validation) return res.status(400).json({ error: validation });
+
+  const now = new Date().toISOString();
+  const id = `merge_${crypto.randomBytes(8).toString('hex')}`;
+  db.transaction(() => {
+    db.prepare(`INSERT INTO game_merge_groups (id, user_id, primary_app_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)`).run(id, userId, primaryAppId, now, now);
+    const add = db.prepare('INSERT INTO game_merge_members (group_id, user_id, app_id) VALUES (?, ?, ?)');
+    for (const appId of appIds) add.run(id, userId, appId);
+  })();
+  logger.info('Game merge group created', { user_id: userId, group_id: id, primary_app_id: primaryAppId, app_ids: appIds });
+  if (app.locals.broadcastLeaderboardUpdate) app.locals.broadcastLeaderboardUpdate(userId, 'merge_group_create');
+  res.json({ ok: true, merge_group: serialiseMergeGroup(db.prepare('SELECT * FROM game_merge_groups WHERE id = ?').get(id)) });
+});
+
+app.patch('/api/users/:id/merge-groups/:groupId', requireSetup, (req, res) => {
+  const userId = parseInt(req.params.id);
+  const groupId = req.params.groupId;
+  const group = db.prepare('SELECT * FROM game_merge_groups WHERE id = ? AND user_id = ?').get(groupId, userId);
+  if (!group) return res.status(404).json({ error: 'Merge group not found' });
+
+  const currentIds = db.prepare('SELECT app_id FROM game_merge_members WHERE group_id = ? ORDER BY app_id').all(groupId).map(r => r.app_id);
+  let nextIds = currentIds.slice();
+  if (req.body?.addAppId !== undefined) nextIds = [...new Set([...nextIds, Number(req.body.addAppId)])];
+  if (req.body?.removeAppId !== undefined) nextIds = nextIds.filter(id => id !== Number(req.body.removeAppId));
+  if (Array.isArray(req.body?.appIds) || Array.isArray(req.body?.mergedAppIds)) {
+    nextIds = normaliseMergeAppIds(req.body.appIds || req.body.mergedAppIds);
+  }
+
+  if (nextIds.length < 2) {
+    db.transaction(() => {
+      db.prepare('DELETE FROM game_merge_members WHERE group_id = ?').run(groupId);
+      db.prepare('DELETE FROM game_merge_groups WHERE id = ?').run(groupId);
+    })();
+    logger.info('Game merge group dissolved', { user_id: userId, group_id: groupId });
+    if (app.locals.broadcastLeaderboardUpdate) app.locals.broadcastLeaderboardUpdate(userId, 'merge_group_dissolve');
+    return res.json({ ok: true, dissolved: true });
+  }
+
+  let primaryAppId = req.body?.primaryAppId !== undefined ? Number(req.body.primaryAppId) : group.primary_app_id;
+  if (!nextIds.includes(primaryAppId)) primaryAppId = nextIds[0];
+  const validation = validateMergeApps(userId, nextIds, groupId);
+  if (validation) return res.status(400).json({ error: validation });
+
+  const now = new Date().toISOString();
+  db.transaction(() => {
+    db.prepare('UPDATE game_merge_groups SET primary_app_id = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+      .run(primaryAppId, now, groupId, userId);
+    db.prepare('DELETE FROM game_merge_members WHERE group_id = ?').run(groupId);
+    const add = db.prepare('INSERT INTO game_merge_members (group_id, user_id, app_id) VALUES (?, ?, ?)');
+    for (const appId of nextIds) add.run(groupId, userId, appId);
+  })();
+  logger.info('Game merge group updated', { user_id: userId, group_id: groupId, primary_app_id: primaryAppId, app_ids: nextIds });
+  if (app.locals.broadcastLeaderboardUpdate) app.locals.broadcastLeaderboardUpdate(userId, 'merge_group_update');
+  res.json({ ok: true, merge_group: serialiseMergeGroup(db.prepare('SELECT * FROM game_merge_groups WHERE id = ?').get(groupId)) });
+});
+
+app.delete('/api/users/:id/merge-groups/:groupId', requireSetup, (req, res) => {
+  const userId = parseInt(req.params.id);
+  const groupId = req.params.groupId;
+  const result = db.prepare('DELETE FROM game_merge_groups WHERE id = ? AND user_id = ?').run(groupId, userId);
+  if (!result.changes) return res.status(404).json({ error: 'Merge group not found' });
+  logger.info('Game merge group deleted', { user_id: userId, group_id: groupId });
+  if (app.locals.broadcastLeaderboardUpdate) app.locals.broadcastLeaderboardUpdate(userId, 'merge_group_delete');
+  res.json({ ok: true });
+});
+
 // PATCH an individual game's per-user fields
 app.patch('/api/users/:id/games/:appId', requireSetup, (req, res) => {
   const userId = parseInt(req.params.id);
   const appId = parseInt(req.params.appId);
-  const existing = db.prepare('SELECT play_status FROM user_games WHERE user_id = ? AND app_id = ? LIMIT 1').get(userId, appId);
+  const existing = getCanonicalUserGame(userId, appId);
   if (!existing) return res.status(404).json({ error: 'Game not in user library' });
 
   const { paid_price_cents, playtime_minutes, play_status, notes, manual_override, completed } = req.body || {};
+  const rowCount = db.prepare('SELECT COUNT(*) AS c FROM user_games WHERE user_id = ? AND app_id = ?').get(userId, appId).c;
+  if (playtime_minutes !== undefined && rowCount > 1) {
+    return res.status(400).json({
+      error: 'Manual playtime edits are disabled for games merged from multiple Steam accounts. Sync the account playtime instead.'
+    });
+  }
   const updates = [];
   const params = [];
+  const cleanup = { price: false, status: false, notes: false };
 
   if (paid_price_cents !== undefined) {
     if (paid_price_cents !== null && (paid_price_cents < 0 || !Number.isFinite(paid_price_cents))) return res.status(400).json({ error: 'Invalid price' });
@@ -832,6 +1364,7 @@ app.patch('/api/users/:id/games/:appId', requireSetup, (req, res) => {
     updates.push('paid_price_cents = ?'); params.push(nextPrice);
     updates.push('price_is_estimated = ?'); params.push(0);
     updates.push('price_estimate_source = ?'); params.push(null);
+    cleanup.price = true;
 
     // If a user manually types in a real price for something previously marked
     // Free/Gifted/Complimentary, it should rejoin the normal ledger flow.
@@ -851,21 +1384,28 @@ app.patch('/api/users/:id/games/:appId', requireSetup, (req, res) => {
     const valid = ['unplayed', 'playing', 'completed', 'exempt', 'free'];
     if (!valid.includes(play_status)) return res.status(400).json({ error: 'Invalid status' });
     updates.push('play_status = ?'); params.push(play_status);
+    cleanup.status = true;
   }
   if (notes !== undefined) {
     updates.push('notes = ?'); params.push(notes || null);
+    cleanup.notes = true;
   }
   if (manual_override !== undefined) {
     updates.push('manual_override = ?'); params.push(manual_override ? 1 : 0);
   }
   if (completed !== undefined) {
     updates.push('completed_at = ?'); params.push(completed ? Date.now() : null);
+    cleanup.status = true;
   }
 
   if (!updates.length) return res.status(400).json({ error: 'No fields to update' });
 
-  params.push(userId, appId);
-  db.prepare(`UPDATE user_games SET ${updates.join(', ')} WHERE user_id = ? AND app_id = ?`).run(...params);
+  params.push(userId, appId, accountKey(existing.steam_account_id));
+  db.transaction(() => {
+    db.prepare(`UPDATE user_games SET ${updates.join(', ')}
+      WHERE user_id = ? AND app_id = ? AND COALESCE(steam_account_id, 0) = ?`).run(...params);
+    clearDuplicateLedgerFields(userId, appId, existing.steam_account_id, cleanup);
+  })();
   logger.info('Game updated', { user_id: userId, app_id: appId, fields: Object.keys(req.body) });
 
   // Check if this game was the user's personal GotW — if now paid/completed, auto-reroll
@@ -873,40 +1413,19 @@ app.patch('/api/users/:id/games/:appId', requireSetup, (req, res) => {
     const gotw = getCurrentGotWPicks();
     // personal_picks keys may be strings (JSON) — match against both
     const currentPersonalPick = gotw?.personal_picks?.[userId] ?? gotw?.personal_picks?.[String(userId)];
-    if (currentPersonalPick === appId) {
-      const ug = db.prepare(`SELECT SUM(playtime_minutes) AS playtime_minutes,
-        SUM(paid_price_cents) AS paid_price_cents,
-        MAX(CASE WHEN play_status = 'completed' THEN 3 WHEN play_status = 'exempt' THEN 2 WHEN play_status = 'free' THEN 1 ELSE 0 END) AS status_rank
-        FROM user_games WHERE user_id = ? AND app_id = ?`).get(userId, appId);
-      if (ug) {
-        const hours = (ug.playtime_minutes || 0) / 60;
-        const price = (ug.paid_price_cents || 0) / 100;
-        const isCompleted = ug.status_rank === 3;
-        const isExempt = ug.status_rank === 2;
-        const settled = isCompleted || isExempt || (price > 0 && hours >= price);
+    if (currentPersonalPick && isGameInSameMergeGroup(userId, currentPersonalPick, appId)) {
+      const rows = getEffectiveLedgerEntriesForPlayer(userId, { gotwPicks: gotw });
+      const effective = rows.find(r => Number(r.app_id) === Number(currentPersonalPick) ||
+        (Array.isArray(r.merged_app_ids) && r.merged_app_ids.map(Number).includes(Number(currentPersonalPick))));
+      if (effective) {
+        const settled = !isUnpaidContractRow(effective);
         if (settled) {
-          // Pick a new personal game — aggregate across accounts first
-          const allRaw = db.prepare(`SELECT app_id, playtime_minutes, paid_price_cents, play_status
-            FROM user_games WHERE user_id = ?`).all(userId);
-          const byApp = new Map();
-          for (const r2 of allRaw) {
-            const ex = byApp.get(r2.app_id);
-            if (!ex) { byApp.set(r2.app_id, { ...r2 }); continue; }
-            ex.playtime_minutes = (ex.playtime_minutes || 0) + (r2.playtime_minutes || 0);
-            ex.paid_price_cents = (ex.paid_price_cents || 0) + (r2.paid_price_cents || 0);
-            if (r2.play_status === 'completed' || ex.play_status === 'completed') ex.play_status = 'completed';
-            else if (r2.play_status === 'exempt' || ex.play_status === 'exempt') ex.play_status = 'exempt';
-            else if (r2.play_status === 'free' || ex.play_status === 'free') ex.play_status = 'free';
-          }
-          const unpaid = [];
-          for (const r2 of byApp.values()) {
-            if (r2.play_status === 'exempt' || r2.play_status === 'free' || r2.play_status === 'completed') continue;
-            const p = (r2.paid_price_cents || 0) / 100;
-            const h = (r2.playtime_minutes || 0) / 60;
-            if (p > 0 && h < p && r2.app_id !== appId) unpaid.push(r2.app_id);
-          }
+          const unpaid = rows
+            .filter(r => isUnpaidContractRow(r))
+            .filter(r => !isGameInSameMergeGroup(userId, r.app_id, currentPersonalPick))
+            .map(r => r.app_id);
           // Exclude group GotW
-          let pool = unpaid.filter(id => id !== gotw.group_app_id);
+          let pool = unpaid.filter(id => !isGameInSameMergeGroup(userId, id, gotw.group_app_id));
           if (!pool.length) pool = unpaid;
           if (pool.length) {
             const newPick = pool[Math.floor(Math.random() * pool.length)];
@@ -916,7 +1435,7 @@ app.patch('/api/users/:id/games/:appId', requireSetup, (req, res) => {
             db.prepare(`INSERT OR REPLACE INTO games_of_week (week_start_at, group_app_id, personal_picks_json, picked_at)
               VALUES (?, ?, ?, ?)`).run(weekStart, gotw.group_app_id, JSON.stringify(personal), now);
             const newGame = db.prepare('SELECT name FROM games WHERE app_id = ?').get(newPick);
-            logger.info('Personal GotW auto-rerolled (previous game settled)', { user_id: userId, old_app_id: appId, new_app_id: newPick, new_name: newGame?.name });
+            logger.info('Personal GotW auto-rerolled (previous game settled)', { user_id: userId, old_app_id: currentPersonalPick, settled_app_id: appId, new_app_id: newPick, new_name: newGame?.name });
           }
         }
       }
@@ -1563,28 +2082,34 @@ app.post('/api/users/:id/import-history', requireSetup, (req, res) => {
   }
 
   let saved = 0, dlc_linked = 0, pending = 0, skipped = 0, preserved = 0;
+  const getImportedGame = db.prepare(`SELECT paid_price_cents FROM user_games
+    WHERE user_id = ? AND app_id = ? AND COALESCE(steam_account_id, 0) = ?`);
+  const updateImportedGame = db.prepare(`UPDATE user_games
+    SET paid_price_cents = ?,
+        price_is_estimated = 0,
+        price_estimate_source = NULL,
+        play_status = CASE WHEN play_status = 'free' AND ? > 0 THEN 'unplayed' ELSE play_status END
+    WHERE user_id = ? AND app_id = ? AND COALESCE(steam_account_id, 0) = ?`);
+  const insertImportedGame = db.prepare(`INSERT INTO user_games
+    (user_id, app_id, paid_price_cents, price_is_estimated, price_estimate_source, play_status, steam_account_id)
+    VALUES (?,?,?,?,NULL,?,?)`);
   db.transaction(() => {
     // Write each unique app_id ONCE with the summed total
     // Re-import safety: take MAX of (current stored price) and (newly imported total)
     // so reimporting doesn't double-count, manual edits aren't lost, but new purchases bump up
     for (const [appId, total] of totals.entries()) {
-      const existing = db.prepare('SELECT paid_price_cents FROM user_games WHERE user_id = ? AND app_id = ?').get(userId, appId);
+      const existing = getImportedGame.get(userId, appId, accountKey(targetAccountId));
       if (existing) {
         const currentVal = existing.paid_price_cents || 0;
         const winner = Math.max(currentVal, total);
         if (winner !== currentVal) {
-          db.prepare(`UPDATE user_games
-            SET paid_price_cents = ?,
-                price_is_estimated = 0,
-                price_estimate_source = NULL,
-                play_status = CASE WHEN play_status = 'free' AND ? > 0 THEN 'unplayed' ELSE play_status END
-            WHERE user_id = ? AND app_id = ?`).run(winner, winner, userId, appId);
+          updateImportedGame.run(winner, winner, userId, appId, accountKey(targetAccountId));
           saved++;
         } else {
           preserved++;
         }
       } else {
-        db.prepare('INSERT INTO user_games (user_id, app_id, paid_price_cents, price_is_estimated, price_estimate_source, play_status, steam_account_id) VALUES (?,?,?,?,NULL,?,?)').run(userId, appId, total, 0, total > 0 ? 'unplayed' : null, targetAccountId);
+        insertImportedGame.run(userId, appId, total, 0, total > 0 ? 'unplayed' : null, targetAccountId);
         saved++;
       }
     }
@@ -1769,9 +2294,7 @@ async function estimatePricesForUser(userId, reEstimate = false) {
         const hist = histMap.get(itadId);
         if (hist && hist.cents > 0) {
           const source = `Historical low: £${(hist.cents / 100).toFixed(2)} at ${hist.shop} (via IsThereAnyDeal)`;
-          db.prepare(`UPDATE user_games SET paid_price_cents = ?, price_is_estimated = 1, price_estimate_source = ?
-            WHERE user_id = ? AND app_id = ?`).run(hist.cents, source, userId, appId);
-          updated++;
+          if (updateCanonicalPrice(userId, appId, hist.cents, true, source) > 0) updated++;
           handledAppIds.add(appId);
         }
       }
@@ -1791,17 +2314,25 @@ async function estimatePricesForUser(userId, reEstimate = false) {
       const entry = data[String(row.app_id)];
       if (!entry?.success || !entry?.data) { failed++; continue; }
       if (entry.data.is_free) {
-        db.prepare(`UPDATE user_games SET play_status = 'free' WHERE user_id = ? AND app_id = ?`).run(userId, row.app_id);
-        markedFree++; continue;
+        const existing = getCanonicalUserGame(userId, row.app_id, getPrimarySteamAccountId(userId));
+        if (existing) {
+          db.transaction(() => {
+            db.prepare(`UPDATE user_games SET play_status = 'free'
+              WHERE user_id = ? AND app_id = ? AND COALESCE(steam_account_id, 0) = ?`)
+              .run(userId, row.app_id, accountKey(existing.steam_account_id));
+            clearDuplicateLedgerFields(userId, row.app_id, existing.steam_account_id, { status: true });
+          })();
+          markedFree++;
+        }
+        continue;
       }
       const po = entry.data.price_overview;
       if (po) {
         const cents = po.final ?? po.initial;
         if (cents && cents > 0) {
           const source = `Current Steam store price: £${(cents / 100).toFixed(2)}`;
-          db.prepare(`UPDATE user_games SET paid_price_cents = ?, price_is_estimated = 1, price_estimate_source = ?
-            WHERE user_id = ? AND app_id = ?`).run(cents, source, userId, row.app_id);
-          updated++; continue;
+          if (updateCanonicalPrice(userId, row.app_id, cents, true, source) > 0) updated++;
+          continue;
         }
       }
       failed++;
@@ -1833,8 +2364,8 @@ app.post('/api/users/:id/resolve-pending', requireSetup, (req, res) => {
   if (!pending_id || !app_id) return res.status(400).json({ error: 'pending_id and app_id required' });
   const pending = db.prepare('SELECT * FROM pending_prices WHERE id = ? AND user_id = ?').get(pending_id, userId);
   if (!pending) return res.status(404).json({ error: 'Pending entry not found' });
-  const exists = db.prepare('SELECT 1 FROM user_games WHERE user_id = ? AND app_id = ?').get(userId, app_id);
-  if (exists) db.prepare('UPDATE user_games SET paid_price_cents = ? WHERE user_id = ? AND app_id = ?').run(pending.paid_price_cents, userId, app_id);
+  const exists = getCanonicalUserGame(userId, app_id, getPrimarySteamAccountId(userId));
+  if (exists) updateCanonicalPrice(userId, app_id, pending.paid_price_cents, false, null);
   else db.prepare('INSERT INTO user_games (user_id, app_id, paid_price_cents) VALUES (?,?,?)').run(userId, app_id, pending.paid_price_cents);
   db.prepare('DELETE FROM pending_prices WHERE id = ?').run(pending_id);
   logger.info('Pending resolved', { user_id: userId, app_id, pending_id });
@@ -1847,20 +2378,76 @@ app.get('/api/users/:id/pending-prices', requireSetup, (req, res) => {
 
 // ---------- Admin/debug ----------
 function requireAdmin(req, res, next) {
-  if (!verifyPassword(req.headers['x-admin-password'] || req.query.password)) return res.status(401).json({ error: 'Admin password required' });
+  if (!verifyPassword(req.headers['x-admin-password'])) return res.status(401).json({ error: 'Admin password required' });
   next();
 }
 app.post('/api/admin/verify', (req, res) => res.json({ ok: verifyPassword(req.body?.password) }));
 app.get('/api/debug/info', requireAdmin, (req, res) => {
   const mem = process.memoryUsage();
+  const gotw = getCurrentGotWPicks();
+  const mergeRows = db.prepare(`SELECT mg.id, mg.user_id, u.display_name, mg.primary_app_id, pg.name AS primary_name,
+      GROUP_CONCAT(gm.app_id || ':' || COALESCE(g.name, 'Unknown'), ' | ') AS games
+    FROM game_merge_groups mg
+    JOIN users u ON u.id = mg.user_id
+    JOIN game_merge_members gm ON gm.group_id = mg.id
+    LEFT JOIN games g ON g.app_id = gm.app_id
+    LEFT JOIN games pg ON pg.app_id = mg.primary_app_id
+    GROUP BY mg.id
+    ORDER BY u.display_name COLLATE NOCASE, mg.created_at`).all();
   res.json({ version:VERSION, node_version:process.version, uptime_seconds:Math.floor(process.uptime()),
     memory_mb:{ rss:Math.round(mem.rss/1048576), heap:Math.round(mem.heapUsed/1048576) },
     db_stats:{
       users:db.prepare('SELECT COUNT(*) AS c FROM users').get().c,
       games:db.prepare('SELECT COUNT(*) AS c FROM games').get().c,
       user_games:db.prepare('SELECT COUNT(*) AS c FROM user_games').get().c,
-      sync_log:db.prepare('SELECT COUNT(*) AS c FROM sync_log').get().c },
+      sync_log:db.prepare('SELECT COUNT(*) AS c FROM sync_log').get().c,
+      merge_groups:db.prepare('SELECT COUNT(*) AS c FROM game_merge_groups').get().c },
+    merge_groups: mergeRows.map(r => {
+      const ids = String(r.games || '').split(' | ').filter(Boolean).map(x => Number(x.split(':')[0]));
+      const personal = gotw?.personal_picks?.[r.user_id] ?? gotw?.personal_picks?.[String(r.user_id)];
+      return {
+        player: r.display_name,
+        player_id: r.user_id,
+        merge_group_id: r.id,
+        primary_game: { app_id: r.primary_app_id, name: r.primary_name },
+        merged_games: String(r.games || '').split(' | ').filter(Boolean),
+        contains_double_xp_game: ids.includes(Number(gotw?.group_app_id)) || ids.includes(Number(personal)),
+      };
+    }),
     setup_complete:isSetupComplete(), log_files:fs.readdirSync(LOGS_DIR).sort() });
+});
+app.get('/api/admin/steam-metadata', requireAdmin, (req, res) => {
+  const rows = db.prepare(`SELECT g.app_id, g.name, g.steam_metadata_last_synced_at
+    FROM games g
+    WHERE g.app_id > 0
+      AND (g.steam_metadata_last_synced_at IS NULL OR g.genres_json IS NULL OR g.categories_json IS NULL)
+    ORDER BY g.name COLLATE NOCASE
+    LIMIT 200`).all();
+  const totals = db.prepare(`SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN app_id > 0 AND steam_metadata_last_synced_at IS NOT NULL THEN 1 ELSE 0 END) AS synced,
+      SUM(CASE WHEN app_id > 0 AND (steam_metadata_last_synced_at IS NULL OR genres_json IS NULL OR categories_json IS NULL) THEN 1 ELSE 0 END) AS missing
+    FROM games WHERE app_id > 0`).get();
+  res.json({ ok: true, totals, missing: rows.map(r => ({
+    app_id: r.app_id,
+    name: r.name,
+    steamMetadataLastSyncedAt: r.steam_metadata_last_synced_at ? new Date(r.steam_metadata_last_synced_at).toISOString() : null,
+  })) });
+});
+app.post('/api/admin/steam-metadata/refresh', requireAdmin, async (req, res) => {
+  try {
+    const appId = req.body?.app_id == null ? null : Number(req.body.app_id);
+    const ids = appId
+      ? [appId]
+      : db.prepare('SELECT app_id FROM games WHERE app_id > 0 ORDER BY name COLLATE NOCASE').all().map(r => r.app_id);
+    if (appId && !Number.isInteger(appId)) return res.status(400).json({ ok: false, error: 'Valid app_id required' });
+    const result = await refreshSteamMetadataForAppIds(ids, { force: true });
+    logger.info('Manual Steam metadata refresh complete', { app_id: appId, ...result });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    logger.error('Manual Steam metadata refresh failed', { error: err.message });
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 app.get('/api/debug/logs', requireAdmin, (req, res) => {
   const file = path.join(LOGS_DIR, `app-${todayStamp()}.log`);
@@ -1930,7 +2517,7 @@ app.locals.broadcastLeaderboardUpdate = broadcastLeaderboardUpdate;
 //   - Baseline = playtime at the moment XP tracking started (set on first sync)
 //   - Hours played since baseline earn XP if the game was a contract (not free/exempt)
 //     and the hours were spent while still under the paid threshold
-//   - Games of the Week (group + personal) earn 1.5x for hours played on them
+//   - Games of the Week (group + personal) earn Double XP for hours played on them
 // XP is computed on-demand from current state — never stored as a counter.
 
 function getCurrentGotWPicks() {
@@ -1949,22 +2536,7 @@ function computeUserXpReceipt(userId, gotwPicks) {
   const baselineMap = new Map();
   for (const b of baselines) baselineMap.set(b.app_id, b);
 
-  // Aggregate across Steam accounts: SUM playtime and price per app_id.
-  // Baseline is per (user_id, app_id) so no per-account baseline math needed.
-  const rawRows = db.prepare(`SELECT g.app_id, g.name, ug.playtime_minutes, ug.paid_price_cents, ug.play_status
-    FROM user_games ug JOIN games g ON g.app_id = ug.app_id
-    WHERE ug.user_id = ?`).all(userId);
-  const byApp = new Map();
-  for (const r of rawRows) {
-    const existing = byApp.get(r.app_id);
-    if (!existing) { byApp.set(r.app_id, { ...r }); continue; }
-    existing.playtime_minutes = (existing.playtime_minutes || 0) + (r.playtime_minutes || 0);
-    existing.paid_price_cents = (existing.paid_price_cents || 0) + (r.paid_price_cents || 0);
-    if (r.play_status === 'completed' || existing.play_status === 'completed') existing.play_status = 'completed';
-    else if (r.play_status === 'exempt' || existing.play_status === 'exempt') existing.play_status = 'exempt';
-    else if (r.play_status === 'free' || existing.play_status === 'free') existing.play_status = 'free';
-  }
-  const rows = [...byApp.values()];
+  const rows = getEffectiveLedgerEntriesForPlayer(userId, { gotwPicks });
 
   let totalXp = 0;
   let gotwBonus = 0;
@@ -1974,9 +2546,21 @@ function computeUserXpReceipt(userId, gotwPicks) {
   const groupApp = gotwPicks?.group_app_id || null;
 
   for (const r of rows) {
-    const baselineRow = baselineMap.get(r.app_id);
-    if (!baselineRow) continue; // no baseline yet — game added since baseline creation
-    const baseline = baselineRow.baseline_minutes || 0;
+    const memberIds = r.is_merged ? r.merged_app_ids : [r.app_id];
+    const baselineRows = memberIds.map(id => baselineMap.get(id)).filter(Boolean);
+    if (!baselineRows.length) continue; // no baseline yet — game added since baseline creation
+    let baseline = 0;
+    let baselineAt = null;
+    for (const appId of memberIds) {
+      const b = baselineMap.get(appId);
+      if (b) {
+        baseline += b.baseline_minutes || 0;
+        baselineAt = Math.max(baselineAt || 0, b.baseline_at || 0);
+      } else if (r.is_merged) {
+        const member = r.merged_games?.find(g => Number(g.app_id) === Number(appId));
+        baseline += member?.playtime_minutes || 0;
+      }
+    }
     const currentMinutes = r.playtime_minutes || 0;
     const delta = currentMinutes - baseline;
     if (delta <= 0) continue;
@@ -1993,9 +2577,9 @@ function computeUserXpReceipt(userId, gotwPicks) {
     const baseXp = minutesUnderThreshold / 60; // 1 XP per hour
 
     let bonusType = null;
-    if (r.app_id === groupApp) bonusType = 'Group Game of the Week';
-    if (r.app_id === personalApp) bonusType = bonusType ? 'Group + Personal Game of the Week' : 'Personal Game of the Week';
-    const multiplier = bonusType ? 1.5 : 1.0;
+    if (memberIds.some(id => qualifiesForDoubleXp(userId, id, groupApp))) bonusType = 'Group Game of the Week';
+    if (memberIds.some(id => qualifiesForDoubleXp(userId, id, personalApp))) bonusType = bonusType ? 'Group + Personal Game of the Week' : 'Personal Game of the Week';
+    const multiplier = bonusType ? GOTW_XP_MULTIPLIER : 1.0;
 
     const earned = baseXp * multiplier;
     const bonus = earned - baseXp;
@@ -2015,7 +2599,9 @@ function computeUserXpReceipt(userId, gotwPicks) {
       total_xp: roundXp(earned),
       multiplier,
       bonus_type: bonusType,
-      baseline_at: baselineRow.baseline_at || null,
+      merge_group_id: r.merge_group_id || null,
+      merged_app_ids: r.merged_app_ids || null,
+      baseline_at: baselineAt || null,
     });
   }
 
@@ -2042,23 +2628,8 @@ function computeLeaderboard() {
   const gotwPicks = getCurrentGotWPicks();
 
   const result = users.map(u => {
-    // Aggregate across Steam accounts: SUM hours and price. A game is settled when
-    // total hours ≥ total price, regardless of which account played or paid.
-    const rawRows = db.prepare(`SELECT ug.app_id, ug.playtime_minutes, ug.playtime_last_2weeks, ug.paid_price_cents, ug.play_status, ug.completed_at
-      FROM user_games ug WHERE ug.user_id = ?`).all(u.id);
-    const byApp = new Map();
-    for (const r of rawRows) {
-      const existing = byApp.get(r.app_id);
-      if (!existing) { byApp.set(r.app_id, { ...r }); continue; }
-      existing.playtime_minutes = (existing.playtime_minutes || 0) + (r.playtime_minutes || 0);
-      existing.playtime_last_2weeks = (existing.playtime_last_2weeks || 0) + (r.playtime_last_2weeks || 0);
-      existing.paid_price_cents = (existing.paid_price_cents || 0) + (r.paid_price_cents || 0);
-      if (r.play_status === 'completed' || existing.play_status === 'completed') existing.play_status = 'completed';
-      else if (r.play_status === 'exempt' || existing.play_status === 'exempt') existing.play_status = 'exempt';
-      else if (r.play_status === 'free' || existing.play_status === 'free') existing.play_status = 'free';
-      if (r.completed_at && !existing.completed_at) existing.completed_at = r.completed_at;
-    }
-    const rows = [...byApp.values()];
+    // Effective rows respect per-player manual merge groups.
+    const rows = getEffectiveLedgerEntriesForPlayer(u.id, { gotwPicks });
 
     let totalSpent = 0, totalHours = 0, totalDebt = 0, hours2w = 0;
     const counts = { all: rows.length, contracts: 0, paid: 0, arrears: 0, outstanding: 0, free: 0, exempt: 0 };
@@ -2098,9 +2669,11 @@ function computeLeaderboard() {
     let personalGotW = null;
     const personalAppId = gotwPicks?.personal_picks?.[u.id] ?? gotwPicks?.personal_picks?.[String(u.id)];
     if (personalAppId) {
-      const game = db.prepare(`SELECT g.app_id, g.name, ug.playtime_minutes, ug.paid_price_cents
-        FROM games g LEFT JOIN user_games ug ON ug.app_id = g.app_id AND ug.user_id = ?
-        WHERE g.app_id = ?`).get(u.id, personalAppId);
+      const aggregated = rows.find(r => r.app_id === Number(personalAppId) ||
+        (Array.isArray(r.merged_app_ids) && r.merged_app_ids.map(Number).includes(Number(personalAppId))));
+      const game = aggregated
+        ? { ...db.prepare('SELECT app_id, name FROM games WHERE app_id = ?').get(personalAppId), ...aggregated }
+        : db.prepare('SELECT app_id, name FROM games WHERE app_id = ?').get(personalAppId);
       if (game) {
         personalGotW = {
           app_id: game.app_id,
@@ -2207,32 +2780,24 @@ app.get('/api/users/:id/xp-winner-options', requireSetup, (req, res) => {
   const winner = getCurrentWeeklyXpWinner();
   if (!winner || winner.user_id !== userId) return res.status(403).json({ ok: false, error: 'Not the current winner' });
 
-  const rawRows = db.prepare(`SELECT ug.app_id, ug.playtime_minutes, ug.paid_price_cents, ug.play_status, g.name
-    FROM user_games ug JOIN games g ON g.app_id = ug.app_id WHERE ug.user_id = ?`).all(userId);
-  const byApp = new Map();
-  for (const r of rawRows) {
-    const existing = byApp.get(r.app_id);
-    if (!existing) { byApp.set(r.app_id, { ...r }); continue; }
-    existing.playtime_minutes = (existing.playtime_minutes || 0) + (r.playtime_minutes || 0);
-    existing.paid_price_cents = (existing.paid_price_cents || 0) + (r.paid_price_cents || 0);
-    if (r.play_status === 'completed' || existing.play_status === 'completed') existing.play_status = 'completed';
-    else if (r.play_status === 'exempt' || existing.play_status === 'exempt') existing.play_status = 'exempt';
-    else if (r.play_status === 'free' || existing.play_status === 'free') existing.play_status = 'free';
-  }
   const currentGotW = getCurrentGotWPicks();
   const groupAppId = currentGotW?.group_app_id || null;
   const options = [];
-  for (const r of byApp.values()) {
-    if (r.play_status === 'exempt' || r.play_status === 'free' || r.play_status === 'completed') continue;
+  for (const r of getEffectiveLedgerEntriesForPlayer(userId, { gotwPicks: currentGotW })) {
     const price = (r.paid_price_cents || 0) / 100;
     const hours = (r.playtime_minutes || 0) / 60;
-    if (price > 0 && hours < price && r.app_id !== groupAppId) {
+    if (isUnpaidContractRow(r) && !isGameInSameMergeGroup(userId, r.app_id, groupAppId)) {
       options.push({
         app_id: r.app_id,
         name: r.name,
         hours: Math.round(hours * 10) / 10,
         price: Math.round(price * 100) / 100,
         debt: Math.round((price - hours) * 100) / 100,
+        is_merged: !!r.is_merged,
+        merge_group_id: r.merge_group_id || null,
+        merged_app_ids: r.merged_app_ids || null,
+        merged_count: r.merged_count || null,
+        merged_games: r.merged_games ? r.merged_games.map(g => ({ app_id: g.app_id, name: g.name })) : null,
       });
     }
   }
@@ -2250,35 +2815,32 @@ app.post('/api/users/:id/xp-winner-pick', requireSetup, (req, res) => {
   const appId = parseInt(req.body?.app_id);
   if (!Number.isInteger(appId)) return res.status(400).json({ ok: false, error: 'Valid app_id required' });
 
-  // Verify the game is one of the user's unpaid contracts (security check)
-  const game = db.prepare(`SELECT g.name, SUM(ug.playtime_minutes) AS hours_min, SUM(ug.paid_price_cents) AS price_cents,
-      MAX(CASE WHEN ug.play_status IN ('completed','exempt','free') THEN 1 ELSE 0 END) AS is_settled
-    FROM user_games ug JOIN games g ON g.app_id = ug.app_id
-    WHERE ug.user_id = ? AND ug.app_id = ? GROUP BY g.name`).get(userId, appId);
+  // Verify the game is one of the user's effective unpaid contracts. If a
+  // secondary merged app_id is submitted, store the primary/effective app_id.
+  const currentGotW = getCurrentGotWPicks() || {};
+  const game = getEffectiveLedgerEntriesForPlayer(userId, { gotwPicks: currentGotW })
+    .find(r => Number(r.app_id) === appId || (Array.isArray(r.merged_app_ids) && r.merged_app_ids.map(Number).includes(appId)));
   if (!game) return res.status(404).json({ ok: false, error: 'Game not in your library' });
-  if (game.is_settled) return res.status(400).json({ ok: false, error: 'That game is already settled — pick an unpaid contract' });
-  const totalHours = (game.hours_min || 0) / 60;
-  const totalPrice = (game.price_cents || 0) / 100;
-  if (totalPrice <= 0 || totalHours >= totalPrice) {
+  if (!isUnpaidContractRow(game)) {
     return res.status(400).json({ ok: false, error: 'That game has no debt — pick an unpaid contract' });
   }
+  const effectiveAppId = game.app_id;
 
   // Apply the pick to both tables
   const now = Date.now();
-  const currentGotW = getCurrentGotWPicks() || {};
   const personalPicks = { ...(currentGotW.personal_picks || {}) };
-  personalPicks[userId] = appId;
+  personalPicks[userId] = effectiveAppId;
   const weekStart = now - (now % (7 * 24 * 3600 * 1000));
   db.transaction(() => {
     db.prepare(`INSERT OR REPLACE INTO games_of_week (week_start_at, group_app_id, personal_picks_json, picked_at)
       VALUES (?, ?, ?, ?)`).run(weekStart, currentGotW.group_app_id || null, JSON.stringify(personalPicks), now);
     db.prepare(`UPDATE weekly_xp_winners SET picked_app_id = ?, picked_at = ? WHERE week_start_at = ?`)
-      .run(appId, now, weekStart);
+      .run(effectiveAppId, now, weekStart);
   })();
 
-  logger.info('XP winner made their pick', { user_id: userId, app_id: appId, game: game.name });
+  logger.info('XP winner made their pick', { user_id: userId, app_id: effectiveAppId, submitted_app_id: appId, game: game.name });
   if (app.locals.broadcastLeaderboardUpdate) app.locals.broadcastLeaderboardUpdate(userId, 'xp_winner_pick');
-  res.json({ ok: true, app_id: appId, game: { name: game.name } });
+  res.json({ ok: true, app_id: effectiveAppId, game: { name: game.name } });
 });
 
 // =====================================================================
@@ -2360,29 +2922,13 @@ function pickGamesOfTheWeek() {
     return { ok: false, error: 'No users' };
   }
 
-  // Build user → set of arrears/outstanding app_ids
-  // (Aggregate across Steam accounts: a game is "unpaid" only if the merged playtime < price)
+  // Build user → set of effective arrears/outstanding app_ids. Manual merge
+  // groups are treated as one contract, so Metro Exodus + Enhanced Edition is
+  // one candidate after merging, not two duplicate picks.
   const userUnpaid = new Map();
   for (const u of users) {
-    const rawRows = db.prepare(`SELECT ug.app_id, ug.playtime_minutes, ug.paid_price_cents, ug.play_status
-      FROM user_games ug WHERE ug.user_id = ?`).all(u.id);
-    const byApp = new Map();
-    for (const r of rawRows) {
-      const existing = byApp.get(r.app_id);
-      if (!existing) { byApp.set(r.app_id, { ...r }); continue; }
-      existing.playtime_minutes = (existing.playtime_minutes || 0) + (r.playtime_minutes || 0);
-      existing.paid_price_cents = (existing.paid_price_cents || 0) + (r.paid_price_cents || 0);
-      if (r.play_status === 'completed' || existing.play_status === 'completed') existing.play_status = 'completed';
-      else if (r.play_status === 'exempt' || existing.play_status === 'exempt') existing.play_status = 'exempt';
-      else if (r.play_status === 'free' || existing.play_status === 'free') existing.play_status = 'free';
-    }
     const unpaid = new Set();
-    for (const r of byApp.values()) {
-      if (r.play_status === 'exempt' || r.play_status === 'free' || r.play_status === 'completed') continue;
-      const price = (r.paid_price_cents || 0) / 100;
-      const hours = (r.playtime_minutes || 0) / 60;
-      if (price > 0 && hours < price) unpaid.add(r.app_id);
-    }
+    for (const r of getEffectiveLedgerEntriesForPlayer(u.id)) if (isUnpaidContractRow(r)) unpaid.add(r.app_id);
     userUnpaid.set(u.id, unpaid);
   }
 
@@ -2426,7 +2972,7 @@ function pickGamesOfTheWeek() {
       continue;
     }
     const unpaid = [...userUnpaid.get(u.id)];
-    const pool = unpaid.filter(id => id !== groupAppId);
+    const pool = unpaid.filter(id => !isGameInSameMergeGroup(u.id, id, groupAppId));
     const finalPool = pool.length ? pool : unpaid; // if everything is the group game, allow it
     if (finalPool.length > 0) {
       personalPicks[u.id] = finalPool[Math.floor(Math.random() * finalPool.length)];
@@ -2555,7 +3101,7 @@ function buildDigestEmbed() {
   let gotwLine = '*No game picked yet.*';
   if (data.group_gotw) {
     gotwLine = `🎯 **${data.group_gotw.name}** — the contract everyone must answer to.\n` +
-               `Hours played here this week earn **+50% XP** for all players.`;
+               `Hours played here this week earn **x2 XP** for all players.`;
   }
   // Per-player personal picks
   const personalLines = players
@@ -2846,25 +3392,8 @@ app.post('/api/admin/reroll-group-gotw', requireAdmin, (req, res) => {
     const users = db.prepare('SELECT id FROM users').all();
     const userUnpaid = new Map();
     for (const u of users) {
-      const rawRows = db.prepare(`SELECT ug.app_id, ug.playtime_minutes, ug.paid_price_cents, ug.play_status
-        FROM user_games ug WHERE ug.user_id = ?`).all(u.id);
-      const byApp = new Map();
-      for (const r of rawRows) {
-        const existing = byApp.get(r.app_id);
-        if (!existing) { byApp.set(r.app_id, { ...r }); continue; }
-        existing.playtime_minutes = (existing.playtime_minutes || 0) + (r.playtime_minutes || 0);
-        existing.paid_price_cents = (existing.paid_price_cents || 0) + (r.paid_price_cents || 0);
-        if (r.play_status === 'completed' || existing.play_status === 'completed') existing.play_status = 'completed';
-        else if (r.play_status === 'exempt' || existing.play_status === 'exempt') existing.play_status = 'exempt';
-        else if (r.play_status === 'free' || existing.play_status === 'free') existing.play_status = 'free';
-      }
       const unpaid = new Set();
-      for (const r of byApp.values()) {
-        if (r.play_status === 'exempt' || r.play_status === 'free' || r.play_status === 'completed') continue;
-        const price = (r.paid_price_cents || 0) / 100;
-        const hours = (r.playtime_minutes || 0) / 60;
-        if (price > 0 && hours < price) unpaid.add(r.app_id);
-      }
+      for (const r of getEffectiveLedgerEntriesForPlayer(u.id, { gotwPicks: current })) if (isUnpaidContractRow(r)) unpaid.add(r.app_id);
       userUnpaid.set(u.id, unpaid);
     }
     let candidates = null;
@@ -2902,9 +3431,9 @@ app.post('/api/admin/reroll-group-gotw', requireAdmin, (req, res) => {
   }
 });
 
-// Recalculate XP — open to any logged-in user (it's just reading data, no privileged action)
-// Optionally also kicks off a sync for all users so XP reflects fresh Steam data
-app.post('/api/recalculate-xp', requireSetup, async (req, res) => {
+// Recalculate XP and optionally sync all users first. This can contact Steam and
+// mutate sync state, so keep it behind the admin password.
+app.post('/api/recalculate-xp', requireSetup, requireAdmin, async (req, res) => {
   const syncFirst = req.body?.sync !== false; // default true
   const out = { synced: [], errors: [], xp: [] };
   if (syncFirst) {
@@ -2964,28 +3493,13 @@ cron.schedule('0 18 * * 5', () => {
   try {
     const winner = getCurrentWeeklyXpWinner();
     if (!winner || winner.picked_app_id) return;
-    // Auto-pick from their unpaid contracts (matching the normal picker logic)
-    const rawRows = db.prepare(`SELECT ug.app_id, ug.playtime_minutes, ug.paid_price_cents, ug.play_status
-      FROM user_games ug WHERE ug.user_id = ?`).all(winner.user_id);
-    const byApp = new Map();
-    for (const r of rawRows) {
-      const existing = byApp.get(r.app_id);
-      if (!existing) { byApp.set(r.app_id, { ...r }); continue; }
-      existing.playtime_minutes = (existing.playtime_minutes || 0) + (r.playtime_minutes || 0);
-      existing.paid_price_cents = (existing.paid_price_cents || 0) + (r.paid_price_cents || 0);
-      if (r.play_status === 'completed' || existing.play_status === 'completed') existing.play_status = 'completed';
-      else if (r.play_status === 'exempt' || existing.play_status === 'exempt') existing.play_status = 'exempt';
-      else if (r.play_status === 'free' || existing.play_status === 'free') existing.play_status = 'free';
-    }
-    const unpaid = [];
+    // Auto-pick from their effective unpaid contracts (matching the normal picker logic).
     const currentGotW = getCurrentGotWPicks();
     const groupApp = currentGotW?.group_app_id || null;
-    for (const r of byApp.values()) {
-      if (r.play_status === 'exempt' || r.play_status === 'free' || r.play_status === 'completed') continue;
-      const price = (r.paid_price_cents || 0) / 100;
-      const hours = (r.playtime_minutes || 0) / 60;
-      if (price > 0 && hours < price && r.app_id !== groupApp) unpaid.push(r.app_id);
-    }
+    const unpaid = getEffectiveLedgerEntriesForPlayer(winner.user_id, { gotwPicks: currentGotW })
+      .filter(r => isUnpaidContractRow(r))
+      .filter(r => !isGameInSameMergeGroup(winner.user_id, r.app_id, groupApp))
+      .map(r => r.app_id);
     if (!unpaid.length) {
       logger.warn('XP winner deadline: no unpaid contracts available to auto-pick');
       return;

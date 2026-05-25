@@ -79,17 +79,41 @@
           list.innerHTML = '<p class="muted">No profiles yet. Create the first one below.</p>';
           return;
         }
-        list.innerHTML = d.users.map(u => `
-          <div class="profile-row" onclick="selectProfile(${u.id}, '${u.display_name.replace(/'/g,"\\'")}')">
-            <img src="${u.avatar_url || ''}" alt="" class="avatar" onerror="this.style.display='none'" />
-            <div class="profile-info">
-              <strong>${u.display_name}</strong>
-              <small>${u.steam_id || 'no Steam ID'}</small>
-            </div>
-          </div>
-        `).join('');
+        list.replaceChildren(...d.users.map(u => {
+          const row = document.createElement('div');
+          row.className = 'profile-row';
+          row.tabIndex = 0;
+
+          const img = document.createElement('img');
+          img.className = 'avatar';
+          img.alt = '';
+          if (u.avatar_url) img.src = u.avatar_url;
+          img.addEventListener('error', () => { img.style.display = 'none'; });
+
+          const info = document.createElement('div');
+          info.className = 'profile-info';
+          const name = document.createElement('strong');
+          name.textContent = u.display_name || '';
+          const steam = document.createElement('small');
+          steam.textContent = u.steam_id || 'no Steam ID';
+          info.append(name, steam);
+
+          row.append(img, info);
+          row.addEventListener('click', () => selectProfile(u.id, u.display_name || ''));
+          row.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter' || ev.key === ' ') {
+              ev.preventDefault();
+              selectProfile(u.id, u.display_name || '');
+            }
+          });
+          return row;
+        }));
       } catch (err) {
-        list.innerHTML = '<p class="err-text">Error loading profiles: ' + err.message + '</p>';
+        list.replaceChildren();
+        const p = document.createElement('p');
+        p.className = 'err-text';
+        p.textContent = 'Error loading profiles: ' + err.message;
+        list.append(p);
       }
     }
 
