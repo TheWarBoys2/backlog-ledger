@@ -29,6 +29,27 @@
           <option value="unplayed">Unplayed</option>
         </select>
       </div>
+      <div class="library-finder">
+        <div class="finder-field">
+          <label for="genre-filter">Genre</label>
+          <select id="genre-filter" multiple size="4"></select>
+        </div>
+        <div class="finder-field">
+          <label for="category-filter">Steam category / feature</label>
+          <select id="category-filter" multiple size="4"></select>
+        </div>
+        <div class="finder-field finder-quick">
+          <label>Play style</label>
+          <div class="finder-chips">
+            <button class="tb-btn finder-chip" type="button" data-quick-filter="solo">Solo</button>
+            <button class="tb-btn finder-chip" type="button" data-quick-filter="localCoop">Local Co-op</button>
+            <button class="tb-btn finder-chip" type="button" data-quick-filter="onlineCoop">Online Co-op</button>
+            <button class="tb-btn finder-chip" type="button" data-quick-filter="localMultiplayer">Local Multiplayer</button>
+            <button class="tb-btn finder-chip" type="button" data-quick-filter="controllerFriendly">Controller Friendly</button>
+          </div>
+          <button class="tb-btn" id="clear-finder" type="button">Clear filters</button>
+        </div>
+      </div>
       <div id="library-table">Loading…</div>
     </div>
   </main>
@@ -39,6 +60,42 @@
     if (!profile) { window.location.href = '/profiles.html'; }
 
     let allGames = [];
+    const finder = { genres: new Set(), categories: new Set(), quick: new Set() };
+    const quickFilters = {
+      solo: ['single-player', 'single player'],
+      localCoop: ['shared/split screen co-op', 'shared/split screen coop', 'shared/split screen', 'local co-op', 'local coop', 'local cooperative'],
+      onlineCoop: ['online co-op', 'online coop', 'online cooperative', 'co-op online'],
+      localMultiplayer: ['local multiplayer', 'shared/split screen pvp', 'shared/split screen', 'local pvp', 'local multi-player'],
+      controllerFriendly: ['full controller support', 'partial controller support', 'controller support'],
+    };
+
+    const arr = (g, key) => Array.isArray(g[key]) ? g[key] : [];
+    const normMeta = s => String(s || '').toLowerCase().replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+    const selectedValues = id => new Set([...document.getElementById(id).selectedOptions].map(o => o.value));
+    function matchesQuick(g, key) {
+      const cats = arr(g, 'categories').map(normMeta);
+      return (quickFilters[key] || []).some(needle => cats.some(cat => cat.includes(needle)));
+    }
+    function matchesFinder(g) {
+      if (finder.genres.size && !arr(g, 'genres').some(x => finder.genres.has(x))) return false;
+      if (finder.categories.size && !arr(g, 'categories').some(x => finder.categories.has(x))) return false;
+      for (const q of finder.quick) if (!matchesQuick(g, q)) return false;
+      return true;
+    }
+    function renderFinderOptions() {
+      const fill = (id, values, selected) => {
+        document.getElementById(id).innerHTML = values.map(v =>
+          `<option value="${escapeHtml(v)}" ${selected.has(v) ? 'selected' : ''}>${escapeHtml(v)}</option>`
+        ).join('');
+      };
+      fill('genre-filter', [...new Set(allGames.flatMap(g => arr(g, 'genres')))].sort((a, b) => a.localeCompare(b)), finder.genres);
+      fill('category-filter', [...new Set(allGames.flatMap(g => arr(g, 'categories')))].sort((a, b) => a.localeCompare(b)), finder.categories);
+    }
+    function updateQuickButtons() {
+      document.querySelectorAll('.finder-chip').forEach(btn => {
+        btn.classList.toggle('active', finder.quick.has(btn.dataset.quickFilter));
+      });
+    }
 
     function render() {
       const search = document.getElementById('search').value.toLowerCase();
@@ -47,6 +104,7 @@
       if (filter === 'played') filtered = filtered.filter(g => g.playtime_minutes > 0);
       if (filter === 'unplayed') filtered = filtered.filter(g => g.playtime_minutes === 0);
       if (search) filtered = filtered.filter(g => g.name.toLowerCase().includes(search));
+      filtered = filtered.filter(matchesFinder);
 
       const el = document.getElementById('library-table');
       if (filtered.length === 0) {
@@ -72,6 +130,7 @@
         const r = await fetch(`/api/users/${profile.id}/games`);
         const d = await r.json();
         allGames = d.games || [];
+        renderFinderOptions();
         document.getElementById('subtitle').textContent =
           `${d.stats.total} games • ${d.stats.played} played • ${d.stats.unplayed} unplayed • ${d.stats.total_hours} total hours`;
         render();
@@ -82,6 +141,23 @@
 
     document.getElementById('search').addEventListener('input', render);
     document.getElementById('filter').addEventListener('change', render);
+    document.getElementById('genre-filter').addEventListener('change', () => { finder.genres = selectedValues('genre-filter'); render(); });
+    document.getElementById('category-filter').addEventListener('change', () => { finder.categories = selectedValues('category-filter'); render(); });
+    document.querySelectorAll('.finder-chip').forEach(btn => btn.addEventListener('click', () => {
+      const key = btn.dataset.quickFilter;
+      if (finder.quick.has(key)) finder.quick.delete(key);
+      else finder.quick.add(key);
+      updateQuickButtons();
+      render();
+    }));
+    document.getElementById('clear-finder').addEventListener('click', () => {
+      finder.genres.clear();
+      finder.categories.clear();
+      finder.quick.clear();
+      renderFinderOptions();
+      updateQuickButtons();
+      render();
+    });
     init();
   </script>
 </body>

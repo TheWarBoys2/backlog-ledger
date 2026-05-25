@@ -279,6 +279,90 @@ a:hover { text-decoration: underline; }
 .tb-search { min-width: 160px; }
 .tb-search:focus, .tb-select:focus { outline: none; border-color: var(--gold); }
 
+.game-finder {
+  margin: -8px 0 24px;
+  border: 1px solid var(--rule);
+  background: rgba(255,255,255,0.02);
+}
+.game-finder.active {
+  border-color: rgba(212, 166, 74, 0.55);
+}
+.game-finder summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.finder-active-count {
+  align-items: center;
+  border: 1px solid rgba(212, 166, 74, 0.6);
+  color: var(--gold);
+  padding: 2px 7px;
+  letter-spacing: 0.12em;
+}
+.finder-body,
+.library-finder {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.4fr) minmax(260px, 1.6fr);
+  gap: 12px;
+  padding: 0 14px 14px;
+}
+.library-finder {
+  padding: 0;
+  margin: 0 0 16px;
+}
+.finder-field {
+  min-width: 0;
+}
+.finder-field label {
+  display: block;
+  margin-bottom: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.finder-field select {
+  width: 100%;
+  min-height: 112px;
+  background: var(--bg);
+  border: 1px solid var(--rule-strong);
+  color: var(--ink);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  padding: 7px;
+}
+.finder-field select:focus {
+  outline: none;
+  border-color: var(--gold);
+}
+.finder-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.finder-chip.active {
+  border-color: var(--gold);
+  color: var(--bg);
+  background: var(--gold);
+}
+
+@media (max-width: 900px) {
+  .finder-body,
+  .library-finder {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ============================================================
    LEDGER ROWS
    ============================================================ */

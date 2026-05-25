@@ -148,6 +148,36 @@
     </div>
   </div>
 
+  <section class="game-finder" id="game-finder">
+    <details>
+      <summary>
+        <span>Game Finder</span>
+        <span class="finder-active-count" id="finder-active-count" style="display:none;">0 active</span>
+      </summary>
+      <div class="finder-body">
+        <div class="finder-field">
+          <label for="genre-filter">Genre</label>
+          <select id="genre-filter" multiple size="5"></select>
+        </div>
+        <div class="finder-field">
+          <label for="category-filter">Steam category / feature</label>
+          <select id="category-filter" multiple size="5"></select>
+        </div>
+        <div class="finder-field finder-quick">
+          <label>Play style</label>
+          <div class="finder-chips" id="quick-filters">
+            <button class="tb-btn finder-chip" type="button" data-quick-filter="solo">Solo</button>
+            <button class="tb-btn finder-chip" type="button" data-quick-filter="localCoop">Local Co-op</button>
+            <button class="tb-btn finder-chip" type="button" data-quick-filter="onlineCoop">Online Co-op</button>
+            <button class="tb-btn finder-chip" type="button" data-quick-filter="localMultiplayer">Local Multiplayer</button>
+            <button class="tb-btn finder-chip" type="button" data-quick-filter="controllerFriendly">Controller Friendly</button>
+          </div>
+          <button class="tb-btn" id="clear-finder" type="button">Clear Game Finder</button>
+        </div>
+      </div>
+    </details>
+  </section>
+
   <!-- ============ THE LEDGER ============ -->
   <main class="ledger" id="ledger">
     <div class="empty-state">Loading your games…</div>
@@ -247,7 +277,20 @@ const state = {
   query: '',
   sort: 'pct',
   sortDir: 'desc',
+  finder: {
+    genres: new Set(),
+    categories: new Set(),
+    quick: new Set(),
+  },
   editingNotesAppId: null,
+};
+
+const QUICK_FILTERS = {
+  solo: ['single-player', 'single player'],
+  localCoop: ['shared/split screen co-op', 'shared/split screen coop', 'shared/split screen', 'local co-op', 'local coop', 'local cooperative'],
+  onlineCoop: ['online co-op', 'online coop', 'online cooperative', 'co-op online'],
+  localMultiplayer: ['local multiplayer', 'shared/split screen pvp', 'shared/split screen', 'local pvp', 'local multi-player'],
+  controllerFriendly: ['full controller support', 'partial controller support', 'controller support'],
 };
 
 // ---------- formatting (from original) ----------
@@ -300,6 +343,36 @@ function recomputeStats() {
   state.stats = { counts: c, spent, hours, debt, avgPerHr: hours > 0 ? spent / hours : null };
 }
 
+function arr(g, key) {
+  return Array.isArray(g[key]) ? g[key] : [];
+}
+
+function normMeta(s) {
+  return String(s || '').toLowerCase().replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+}
+
+function categoryMatchesQuick(g, quickKey) {
+  const needles = QUICK_FILTERS[quickKey] || [];
+  const cats = arr(g, 'categories').map(normMeta);
+  return needles.some(needle => cats.some(cat => cat.includes(needle)));
+}
+
+function finderActiveCount() {
+  return state.finder.genres.size + state.finder.categories.size + state.finder.quick.size;
+}
+
+function matchesFinder(g) {
+  if (!finderActiveCount()) return true;
+  const genres = arr(g, 'genres');
+  const categories = arr(g, 'categories');
+  if (state.finder.genres.size && !genres.some(x => state.finder.genres.has(x))) return false;
+  if (state.finder.categories.size && !categories.some(x => state.finder.categories.has(x))) return false;
+  for (const quick of state.finder.quick) {
+    if (!categoryMatchesQuick(g, quick)) return false;
+  }
+  return true;
+}
+
 // ---------- visible list (port from original) ----------
 function visibleGames() {
   let list = state.games.slice();
@@ -310,6 +383,7 @@ function visibleGames() {
   else if (state.filter === 'free') list = list.filter(g => g.kind === 'free');
 
   if (state.query) list = list.filter(g => g.lname.includes(state.query));
+  list = list.filter(matchesFinder);
 
   const dir = state.sortDir === 'asc' ? 1 : -1;
   const cmp = {
@@ -347,6 +421,32 @@ function renderStats() {
   const settle = c.contracts > 0 ? Math.round((c.paid / c.contracts) * 100) + '%' : '—';
   $('ms-standing').textContent = settle;
   $('ms-updated').textContent = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }).toUpperCase();
+}
+
+function renderFinderOptions() {
+  const collect = key => [...new Set(state.games.flatMap(g => arr(g, key)))]
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+  const renderSelect = (id, values, selected) => {
+    const el = $(id);
+    const previous = new Set([...el.selectedOptions].map(o => o.value));
+    const keep = selected || previous;
+    el.innerHTML = values.map(v => `<option value="${escHtml(v)}" ${keep.has(v) ? 'selected' : ''}>${escHtml(v)}</option>`).join('');
+  };
+  renderSelect('genre-filter', collect('genres'), state.finder.genres);
+  renderSelect('category-filter', collect('categories'), state.finder.categories);
+  renderFinderActiveState();
+}
+
+function renderFinderActiveState() {
+  const count = finderActiveCount();
+  const badge = $('finder-active-count');
+  badge.style.display = count ? 'inline-flex' : 'none';
+  badge.textContent = `${count} active`;
+  $('game-finder').classList.toggle('active', count > 0);
+  document.querySelectorAll('.finder-chip').forEach(btn => {
+    btn.classList.toggle('active', state.finder.quick.has(btn.dataset.quickFilter));
+  });
 }
 
 function renderGotW() {
@@ -762,6 +862,40 @@ $('sort-dir').addEventListener('click', () => {
   renderLedger();
 });
 
+function selectedValues(selectId) {
+  return new Set([...$(selectId).selectedOptions].map(o => o.value));
+}
+
+$('genre-filter').addEventListener('change', () => {
+  state.finder.genres = selectedValues('genre-filter');
+  renderFinderActiveState();
+  renderLedger();
+});
+
+$('category-filter').addEventListener('change', () => {
+  state.finder.categories = selectedValues('category-filter');
+  renderFinderActiveState();
+  renderLedger();
+});
+
+document.querySelectorAll('.finder-chip').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const key = btn.dataset.quickFilter;
+    if (state.finder.quick.has(key)) state.finder.quick.delete(key);
+    else state.finder.quick.add(key);
+    renderFinderActiveState();
+    renderLedger();
+  });
+});
+
+$('clear-finder').addEventListener('click', () => {
+  state.finder.genres.clear();
+  state.finder.categories.clear();
+  state.finder.quick.clear();
+  renderFinderOptions();
+  renderLedger();
+});
+
 $('btn-sync').addEventListener('click', async () => {
   if (!state.isOwnProfile) { setStatus('error', 'Can only sync your own profile'); return; }
   $('btn-sync').disabled = true;
@@ -825,6 +959,7 @@ async function reload() {
 
     renderStats();
     renderGotW();
+    renderFinderOptions();
     renderLedger();
     setStatus(state.games.length ? 'ok' : 'empty');
 

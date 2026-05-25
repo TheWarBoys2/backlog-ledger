@@ -18,6 +18,7 @@ const LOGS_DIR = path.join(__dirname, 'logs');
 const LOG_RETENTION_DAYS = 7;
 const VERSION = require('./package.json').version;
 const SYNC_RATE_LIMIT_MS = 30000; // 30s between syncs per user
+const STEAM_METADATA_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 // ---------- Logging ----------
 if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
@@ -73,7 +74,8 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, display_name TEXT NOT NULL,
     steam_id TEXT, discord_user_id TEXT, avatar_url TEXT, created_at INTEGER NOT NULL, last_synced_at INTEGER);
   CREATE TABLE IF NOT EXISTS games (app_id INTEGER PRIMARY KEY, name TEXT NOT NULL,
-    store_price_cents INTEGER, store_price_updated_at INTEGER);
+    store_price_cents INTEGER, store_price_updated_at INTEGER,
+    genres_json TEXT, categories_json TEXT, steam_metadata_last_synced_at INTEGER);
   CREATE TABLE IF NOT EXISTS user_games (user_id INTEGER NOT NULL, app_id INTEGER NOT NULL,
     playtime_minutes INTEGER DEFAULT 0, playtime_last_2weeks INTEGER DEFAULT 0,
     paid_price_cents INTEGER, play_status TEXT DEFAULT 'unplayed', notes TEXT,
@@ -185,6 +187,23 @@ try {
     logger.info('Migration: added steam_account_id column to user_games');
   }
 } catch (err) { logger.error('Migration failed', { error: err.message }); }
+
+// Idempotent migration: cache Steam store metadata on the shared game catalog.
+try {
+  const gameCols = db.prepare("PRAGMA table_info(games)").all();
+  if (!gameCols.some(c => c.name === 'genres_json')) {
+    db.exec('ALTER TABLE games ADD COLUMN genres_json TEXT');
+    logger.info('Migration: added genres_json column to games');
+  }
+  if (!gameCols.some(c => c.name === 'categories_json')) {
+    db.exec('ALTER TABLE games ADD COLUMN categories_json TEXT');
+    logger.info('Migration: added categories_json column to games');
+  }
+  if (!gameCols.some(c => c.name === 'steam_metadata_last_synced_at')) {
+    db.exec('ALTER TABLE games ADD COLUMN steam_metadata_last_synced_at INTEGER');
+    logger.info('Migration: added steam_metadata_last_synced_at column to games');
+  }
+} catch (err) { logger.error('Game metadata migration failed', { error: err.message }); }
 
 // Idempotent migration: old builds keyed user_games by (user_id, app_id),
 // which made overlapping games across multiple Steam accounts impossible.
@@ -358,6 +377,95 @@ async function fetchSteamProfile(steamId, apiKey) {
     return { ok: true, steam_id: steamId, persona_name: player.personaname, avatar_url: player.avatarmedium };
   } catch (err) { return { ok: false, error: err.message }; }
 }
+function parseJsonArray(value) {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter(Boolean).map(String) : [];
+  } catch { return []; }
+}
+function uniqueNames(rows) {
+  const seen = new Set();
+  const out = [];
+  for (const r of rows || []) {
+    const name = String(r?.description || '').trim();
+    const key = name.toLowerCase();
+    if (name && !seen.has(key)) {
+      seen.add(key);
+      out.push(name);
+    }
+  }
+  return out;
+}
+async function refreshSteamMetadataForAppIds(appIds, opts = {}) {
+  const ids = [...new Set((appIds || []).map(Number).filter(id => Number.isInteger(id) && id > 0))];
+  if (!ids.length) return { checked: 0, updated: 0, skipped: 0, failed: 0 };
+
+  const now = Date.now();
+  const force = !!opts.force;
+  const placeholders = ids.map(() => '?').join(',');
+  const existing = db.prepare(`SELECT app_id, genres_json, categories_json, steam_metadata_last_synced_at
+    FROM games WHERE app_id IN (${placeholders})`).all(...ids);
+  const existingById = new Map(existing.map(r => [r.app_id, r]));
+  const candidates = ids.filter(id => {
+    const row = existingById.get(id);
+    if (!row) return false;
+    if (force) return true;
+    if (!row.steam_metadata_last_synced_at) return true;
+    if (!row.genres_json || !row.categories_json) return true;
+    return now - row.steam_metadata_last_synced_at > STEAM_METADATA_TTL_MS;
+  });
+  if (!candidates.length) return { checked: ids.length, updated: 0, skipped: ids.length, failed: 0 };
+
+  const update = db.prepare(`UPDATE games
+    SET genres_json = ?, categories_json = ?, steam_metadata_last_synced_at = ?
+    WHERE app_id = ?`);
+  const saveEntry = (appId, entry) => {
+    if (!entry?.success || !entry?.data) return false;
+    update.run(
+      JSON.stringify(uniqueNames(entry.data.genres)),
+      JSON.stringify(uniqueNames(entry.data.categories)),
+      now,
+      appId
+    );
+    return true;
+  };
+  let updated = 0, failed = 0, rateLimited = 0, forbidden = 0;
+  for (let i = 0; i < candidates.length; i++) {
+    const appId = candidates[i];
+    try {
+      const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=gb&l=english`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        if (res.status === 429) {
+          rateLimited++;
+          logger.warn('Steam metadata refresh paused by rate limit', { app_id: appId, checked: i + 1, remaining: candidates.length - i - 1 });
+          await new Promise(r => setTimeout(r, 5000));
+          failed++;
+        } else if (res.status === 403) {
+          forbidden++;
+          failed++;
+          logger.warn('Steam metadata request forbidden; stopping refresh to avoid hammering Steam', { app_id: appId, checked: i + 1, remaining: candidates.length - i - 1 });
+          failed += candidates.length - i - 1;
+          break;
+        } else {
+          failed++;
+          logger.warn('Steam metadata request failed', { app_id: appId, status: res.status });
+        }
+      } else {
+        const data = await res.json();
+        if (saveEntry(appId, data?.[String(appId)])) updated++;
+        else failed++;
+      }
+    } catch (err) {
+      failed++;
+      logger.warn('Steam metadata refresh failed', { app_id: appId, error: err.message });
+    }
+    if ((i + 1) % 25 === 0) logger.info('Steam metadata refresh progress', { checked: i + 1, total: candidates.length, updated, failed, rate_limited: rateLimited, forbidden });
+    if (i + 1 < candidates.length) await new Promise(r => setTimeout(r, 900));
+  }
+  return { checked: ids.length, updated, skipped: ids.length - candidates.length, failed, rate_limited: rateLimited, forbidden };
+}
 async function testDiscord(token, channelId, sendMessage) {
   try {
     const headers = { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' };
@@ -378,7 +486,7 @@ async function testDiscord(token, channelId, sendMessage) {
 
 // ---------- PHASE 4: Steam library sync ----------
 // Sync one specific Steam account (by user_steam_accounts.id)
-async function syncSteamAccount(accountId) {
+async function syncSteamAccount(accountId, opts = {}) {
   const account = db.prepare('SELECT * FROM user_steam_accounts WHERE id = ?').get(accountId);
   if (!account) return { ok: false, error: 'Steam account not found' };
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(account.user_id);
@@ -521,36 +629,46 @@ async function syncSteamAccount(accountId) {
   });
   txn();
 
+  let metadata = { checked: 0, updated: 0, skipped: 0, failed: 0 };
+  try {
+    metadata = await refreshSteamMetadataForAppIds(games.map(g => g.appid), { force: !!opts.refreshMetadata });
+  } catch (err) {
+    metadata.failed = games.length;
+    logger.warn('Steam metadata refresh did not complete', { user_id: userId, account_id: accountId, error: err.message });
+  }
+
   const elapsed = Date.now() - startedAt;
-  logger.info('Sync complete', { user_id: userId, account_id: accountId, label: accountLabel, added, updated, skipped, total: games.length, ms: elapsed, baselines_set: baselinesSet, baselines_bumped: baselinesBumped, baselines_restored: restoredBaselines });
+  logger.info('Sync complete', { user_id: userId, account_id: accountId, label: accountLabel, added, updated, skipped, total: games.length, ms: elapsed, baselines_set: baselinesSet, baselines_bumped: baselinesBumped, baselines_restored: restoredBaselines, metadata });
   setImmediate(() => {
     if (app && app.locals && app.locals.broadcastLeaderboardUpdate) {
       app.locals.broadcastLeaderboardUpdate(userId, 'sync');
     }
   });
-  return { ok: true, added, updated, skipped, total: games.length, elapsed_ms: elapsed, account_label: accountLabel };
+  return { ok: true, added, updated, skipped, total: games.length, elapsed_ms: elapsed, account_label: accountLabel, metadata };
 }
 
 // Sync ALL of a user's linked Steam accounts. Returns aggregate result.
-async function syncUserLibrary(userId) {
+async function syncUserLibrary(userId, opts = {}) {
   const accounts = db.prepare('SELECT id, label FROM user_steam_accounts WHERE user_id = ?').all(userId);
   if (!accounts.length) return { ok: false, error: 'User has no Steam accounts linked. Add one in profile settings.' };
 
   const results = [];
   let totalAdded = 0, totalUpdated = 0, totalSkipped = 0;
+  const metadata = { checked: 0, updated: 0, skipped: 0, failed: 0 };
   for (const acc of accounts) {
-    const result = await syncSteamAccount(acc.id);
+    const result = await syncSteamAccount(acc.id, opts);
     results.push({ account_id: acc.id, label: acc.label || 'Account', ...result });
     if (result.ok) {
       totalAdded += result.added || 0;
       totalUpdated += result.updated || 0;
       totalSkipped += result.skipped || 0;
+      for (const key of Object.keys(metadata)) metadata[key] += result.metadata?.[key] || 0;
     }
     // Be polite to Steam API between accounts
     if (accounts.length > 1) await new Promise(r => setTimeout(r, 500));
   }
   const anyOk = results.some(r => r.ok);
-  return { ok: anyOk, added: totalAdded, updated: totalUpdated, skipped: totalSkipped, accounts: results };
+  return { ok: anyOk, added: totalAdded, updated: totalUpdated, skipped: totalSkipped, metadata, accounts: results };
 }
 
 // ---------- Express ----------
@@ -788,7 +906,7 @@ app.post('/api/users/:id/steam-accounts/:accountId/sync', requireSetup, async (r
   const account = db.prepare('SELECT id FROM user_steam_accounts WHERE id = ? AND user_id = ?').get(accountId, userId);
   if (!account) return res.status(404).json({ error: 'Steam account not found' });
   try {
-    const result = await syncSteamAccount(accountId);
+    const result = await syncSteamAccount(accountId, { refreshMetadata: !!req.body?.refresh_metadata });
     res.json(result);
   } catch (err) {
     logger.error('Single account sync failed', { error: err.message });
@@ -808,7 +926,7 @@ app.post('/api/users/:id/sync', requireSetup, async (req, res) => {
     return res.status(429).json({ error: `Please wait ${wait}s before syncing again` });
   }
 
-  const result = await syncUserLibrary(userId);
+  const result = await syncUserLibrary(userId, { refreshMetadata: !!req.body?.refresh_metadata });
   if (!result.ok) return res.status(400).json(result);
   res.json(result);
 });
@@ -821,7 +939,8 @@ app.get('/api/users/:id/games', requireSetup, (req, res) => {
   for (const a of accounts) accountById.set(a.id, a);
 
   // Load raw rows (may have duplicates across accounts)
-  const raw = db.prepare(`SELECT g.app_id, g.name, ug.playtime_minutes, ug.playtime_last_2weeks,
+  const raw = db.prepare(`SELECT g.app_id, g.name, g.genres_json, g.categories_json,
+    g.steam_metadata_last_synced_at, ug.playtime_minutes, ug.playtime_last_2weeks,
     ug.paid_price_cents, ug.play_status, ug.manual_override, ug.completed_at, ug.notes,
     COALESCE(ug.price_is_estimated, 0) AS price_is_estimated,
     ug.price_estimate_source, ug.steam_account_id
@@ -845,6 +964,12 @@ app.get('/api/users/:id/games', requireSetup, (req, res) => {
     if (!existing) {
       byAppId.set(r.app_id, {
         ...r,
+        genres: parseJsonArray(r.genres_json),
+        categories: parseJsonArray(r.categories_json),
+        steamMetadataLastSyncedAt: r.steam_metadata_last_synced_at ? new Date(r.steam_metadata_last_synced_at).toISOString() : null,
+        genres_json: undefined,
+        categories_json: undefined,
+        steam_metadata_last_synced_at: undefined,
         steam_accounts: accLabel ? [{ id: r.steam_account_id, label: accLabel }] : [],
         account_breakdown: [accBreakdownEntry],
       });
@@ -1985,6 +2110,39 @@ app.get('/api/debug/info', requireAdmin, (req, res) => {
       user_games:db.prepare('SELECT COUNT(*) AS c FROM user_games').get().c,
       sync_log:db.prepare('SELECT COUNT(*) AS c FROM sync_log').get().c },
     setup_complete:isSetupComplete(), log_files:fs.readdirSync(LOGS_DIR).sort() });
+});
+app.get('/api/admin/steam-metadata', requireAdmin, (req, res) => {
+  const rows = db.prepare(`SELECT g.app_id, g.name, g.steam_metadata_last_synced_at
+    FROM games g
+    WHERE g.app_id > 0
+      AND (g.steam_metadata_last_synced_at IS NULL OR g.genres_json IS NULL OR g.categories_json IS NULL)
+    ORDER BY g.name COLLATE NOCASE
+    LIMIT 200`).all();
+  const totals = db.prepare(`SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN app_id > 0 AND steam_metadata_last_synced_at IS NOT NULL THEN 1 ELSE 0 END) AS synced,
+      SUM(CASE WHEN app_id > 0 AND (steam_metadata_last_synced_at IS NULL OR genres_json IS NULL OR categories_json IS NULL) THEN 1 ELSE 0 END) AS missing
+    FROM games WHERE app_id > 0`).get();
+  res.json({ ok: true, totals, missing: rows.map(r => ({
+    app_id: r.app_id,
+    name: r.name,
+    steamMetadataLastSyncedAt: r.steam_metadata_last_synced_at ? new Date(r.steam_metadata_last_synced_at).toISOString() : null,
+  })) });
+});
+app.post('/api/admin/steam-metadata/refresh', requireAdmin, async (req, res) => {
+  try {
+    const appId = req.body?.app_id == null ? null : Number(req.body.app_id);
+    const ids = appId
+      ? [appId]
+      : db.prepare('SELECT app_id FROM games WHERE app_id > 0 ORDER BY name COLLATE NOCASE').all().map(r => r.app_id);
+    if (appId && !Number.isInteger(appId)) return res.status(400).json({ ok: false, error: 'Valid app_id required' });
+    const result = await refreshSteamMetadataForAppIds(ids, { force: true });
+    logger.info('Manual Steam metadata refresh complete', { app_id: appId, ...result });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    logger.error('Manual Steam metadata refresh failed', { error: err.message });
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 app.get('/api/debug/logs', requireAdmin, (req, res) => {
   const file = path.join(LOGS_DIR, `app-${todayStamp()}.log`);
