@@ -33,9 +33,80 @@ const BL = {
     btn.type = 'button';
     btn.title = 'How to set up your ledger';
     btn.setAttribute('aria-label', 'Open help and setup guide');
-    btn.textContent = '?';
+    btn.innerHTML = '?<span class="help-fab-badge" id="bl-help-fab-badge" hidden></span>';
     btn.addEventListener('click', () => this.openHelpModal());
     document.body.appendChild(btn);
+    this.startMetadataStatusPolling();
+  },
+
+  // Polls the Steam-metadata refresh status and reflects it on the help button.
+  startMetadataStatusPolling() {
+    if (this._metadataPollTimer) return;
+    const tick = async () => {
+      try {
+        const r = await fetch('/api/steam-metadata/status', { cache: 'no-store' });
+        if (r.ok) {
+          const d = await r.json();
+          this._lastMetadataStatus = d;
+          this.applyMetadataStatusToFab(d);
+          this.applyMetadataStatusToModal(d);
+        }
+      } catch { /* ignore — network blips shouldn't spam */ }
+      const status = this._lastMetadataStatus?.status;
+      // Poll faster while something is happening, slower when idle/done.
+      const next = (status === 'running' || status === 'paused') ? 5000 : 30000;
+      this._metadataPollTimer = setTimeout(tick, next);
+    };
+    tick();
+  },
+
+  applyMetadataStatusToFab(d) {
+    const badge = document.getElementById('bl-help-fab-badge');
+    if (!badge) return;
+    const btn = document.getElementById('bl-help-btn');
+    if (!d || d.status === 'idle') {
+      badge.hidden = true;
+      badge.className = 'help-fab-badge';
+      if (btn) btn.title = 'How to set up your ledger';
+      return;
+    }
+    badge.hidden = false;
+    badge.className = 'help-fab-badge status-' + d.status;
+    if (!btn) return;
+    if (d.status === 'running') {
+      const pct = d.total ? Math.floor((d.checked / d.total) * 100) : 0;
+      btn.title = `Pulling Steam game details: ${d.checked}/${d.total} (${pct}%)`;
+    } else if (d.status === 'paused') {
+      btn.title = `Steam metadata refresh paused: ${d.pause?.reason || 'rate limited by Steam'}`;
+    } else if (d.status === 'done') {
+      btn.title = `Steam game details up to date (${d.updated} updated)`;
+    } else if (d.status === 'error') {
+      btn.title = 'Steam metadata refresh hit an error — check server logs';
+    }
+  },
+
+  applyMetadataStatusToModal(d) {
+    const line = document.getElementById('bl-help-metadata-status');
+    if (!line) return;
+    if (!d || d.status === 'idle') {
+      line.textContent = 'Steam game details: up to date.';
+      line.className = 'help-metadata-status status-idle';
+      return;
+    }
+    if (d.status === 'running') {
+      const pct = d.total ? Math.floor((d.checked / d.total) * 100) : 0;
+      line.textContent = `Pulling Steam game details in the background: ${d.checked} / ${d.total} (${pct}%).`;
+      line.className = 'help-metadata-status status-running';
+    } else if (d.status === 'paused') {
+      line.textContent = `Paused: ${d.pause?.reason || 'rate-limited by Steam'}. An admin can resume from the admin tools.`;
+      line.className = 'help-metadata-status status-paused';
+    } else if (d.status === 'done') {
+      line.textContent = `Steam game details are up to date (${d.updated} refreshed${d.failed ? `, ${d.failed} failed` : ''}).`;
+      line.className = 'help-metadata-status status-done';
+    } else if (d.status === 'error') {
+      line.textContent = 'The metadata refresh hit an error — check the server logs.';
+      line.className = 'help-metadata-status status-error';
+    }
   },
 
   openHelpModal() {
@@ -54,6 +125,7 @@ const BL = {
             <div class="modal-sub">A quick guide for players: connect your Steam profile, import your purchase and licence history, then review anything the app cannot match automatically.</div>
           </div>
           <div class="help-modal-body">
+            <div class="help-metadata-status status-idle" id="bl-help-metadata-status">Steam game details: up to date.</div>
             <div class="help-grid">
               <div class="help-card">
                 <span class="help-step">1</span>
@@ -152,6 +224,12 @@ const BL = {
       });
     }
     modal.style.display = 'flex';
+    // Reflect the latest status immediately, then nudge a fresh fetch.
+    if (this._lastMetadataStatus) this.applyMetadataStatusToModal(this._lastMetadataStatus);
+    fetch('/api/steam-metadata/status', { cache: 'no-store' })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) { this._lastMetadataStatus = d; this.applyMetadataStatusToFab(d); this.applyMetadataStatusToModal(d); } })
+      .catch(() => {});
   },
 
   closeHelpModal() {

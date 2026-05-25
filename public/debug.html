@@ -65,6 +65,7 @@
         <div class="actions" style="margin-top:12px;">
           <button class="btn-test" onclick="loadSteamMetadataStatus()">Refresh status</button>
           <button class="btn-primary" onclick="refreshSteamMetadata()">Refresh all metadata</button>
+          <button class="btn-test" onclick="resumeSteamMetadata()">Resume metadata refresh</button>
           <span id="steam-metadata-result" class="test-result"></span>
         </div>
         <pre id="steam-metadata-missing" class="scroll" style="display:none;margin-top:12px;max-height:260px;overflow:auto;"></pre>
@@ -306,7 +307,13 @@
         const total = d.totals?.total || 0;
         const synced = d.totals?.synced || 0;
         const missing = d.totals?.missing || 0;
-        status.textContent = `${synced}/${total} Steam games have cached metadata. ${missing} missing.`;
+        if (d.paused) {
+          const when = d.pause?.paused_at ? new Date(d.pause.paused_at).toLocaleString() : 'unknown time';
+          const reason = d.pause?.reason || 'paused';
+          status.innerHTML = `<strong class="warn">Paused</strong> since ${escHtml(when)} — ${escHtml(reason)}. ${synced}/${total} cached, ${missing} missing.`;
+        } else {
+          status.textContent = `${synced}/${total} Steam games have cached metadata. ${missing} missing.`;
+        }
         out.textContent = (d.missing || []).map(g => `${g.app_id} — ${g.name}`).join('\n') || 'No missing metadata.';
         out.style.display = 'block';
       } catch (err) {
@@ -324,7 +331,27 @@
         });
         const d = await res.json();
         if (!res.ok || !d.ok) throw new Error(d.error || 'failed');
-        r.textContent = `✓ Updated ${d.updated}, skipped ${d.skipped}, failed ${d.failed}`;
+        if (d.paused) {
+          r.textContent = `Paused after updating ${d.updated || 0}; Steam returned 403. Resume later before retrying.`;
+          r.className = 'test-result warn';
+        } else {
+          r.textContent = `✓ Updated ${d.updated}, skipped ${d.skipped}, failed ${d.failed}`;
+          r.className = 'test-result ok';
+        }
+        loadSteamMetadataStatus();
+      } catch (err) {
+        r.textContent = '✗ ' + err.message; r.className = 'test-result err';
+      }
+    }
+
+    async function resumeSteamMetadata() {
+      const r = document.getElementById('steam-metadata-result');
+      r.textContent = 'Resuming…'; r.className = 'test-result';
+      try {
+        const res = await fetch('/api/admin/steam-metadata/resume', { method: 'POST', headers: authHeaders() });
+        const d = await res.json();
+        if (!res.ok || !d.ok) throw new Error(d.error || 'failed');
+        r.textContent = '✓ Metadata refresh resumed. You can start a refresh when Steam Store works again.';
         r.className = 'test-result ok';
         loadSteamMetadataStatus();
       } catch (err) {

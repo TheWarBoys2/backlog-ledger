@@ -5,147 +5,500 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Setup — The Backlog Ledger</title>
   <link rel="stylesheet" href="/style.css" />
+  <style>
+    /* Wizard-specific styling — kept here so it doesn't pollute the global stylesheet
+       while the rest of the app still has no wizard concept. */
+    .wizard-shell { max-width: 760px; }
+    .wizard-progress {
+      display: flex;
+      gap: 6px;
+      margin: 24px 0 28px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--ink-faint);
+      flex-wrap: wrap;
+    }
+    .wizard-progress .step {
+      padding: 6px 10px;
+      border: 1px solid var(--rule);
+      opacity: 0.55;
+    }
+    .wizard-progress .step.active { color: var(--gold); border-color: var(--gold); opacity: 1; }
+    .wizard-progress .step.done { color: var(--paid); border-color: var(--paid); opacity: 0.85; }
+
+    .step-panel { display: none; }
+    .step-panel.active { display: block; }
+
+    .step-title {
+      font-family: 'Fraunces', serif;
+      font-weight: 400;
+      font-size: 28px;
+      letter-spacing: -0.01em;
+      color: var(--ink);
+      margin-bottom: 8px;
+    }
+    .step-lede {
+      font-family: 'Fraunces', serif;
+      font-style: italic;
+      color: var(--ink-dim);
+      margin-bottom: 20px;
+    }
+    .step-body p { margin-bottom: 12px; color: var(--ink-dim); }
+
+    .choice-list { display: grid; gap: 10px; margin: 14px 0 6px; }
+    .choice {
+      display: block;
+      padding: 14px 16px;
+      border: 1px solid var(--rule-strong);
+      cursor: pointer;
+      background: var(--bg);
+    }
+    .choice:hover { border-color: var(--gold); }
+    .choice input { margin-right: 10px; }
+    .choice.selected { border-color: var(--gold); background: var(--bg-3); }
+    .choice .choice-title { font-weight: 500; color: var(--ink); }
+    .choice .choice-desc {
+      display: block;
+      margin-top: 4px;
+      font-family: 'Fraunces', serif;
+      font-style: italic;
+      font-size: 13px;
+      color: var(--ink-faint);
+    }
+
+    .wizard-nav {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-top: 24px;
+      padding-top: 18px;
+      border-top: 1px solid var(--rule);
+      flex-wrap: wrap;
+    }
+    .wizard-nav .right { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+    .toggle-row { display: flex; align-items: center; gap: 10px; }
+    .toggle-row input[type="checkbox"] { width: auto; }
+
+    .url-line {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      color: var(--gold);
+      padding: 8px 12px;
+      border: 1px dashed var(--rule-strong);
+      display: inline-block;
+    }
+    .finish-tick {
+      font-family: 'Fraunces', serif;
+      color: var(--paid);
+      font-size: 18px;
+    }
+  </style>
 </head>
 <body>
-  <main class="container">
-    <h1>Welcome to The Backlog Ledger</h1>
-    <p class="subtitle">First-run setup — this only happens once</p>
+  <main class="container wizard-shell">
 
-    <section class="contract">
-      <div class="contract-text">
-        Before any contract is signed, the office must be furnished. Provide the keys below, and
-        <strong>the ledger shall be opened</strong> for your household. None of this leaves your server —
-        keys, names, and prices remain yours alone.
-      </div>
-    </section>
+    <header style="border-bottom: 1px solid var(--rule); padding-bottom: 16px; margin-bottom: 8px;">
+      <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--ink-faint);">First-run setup</div>
+      <h1 style="font-family: 'Fraunces', serif; font-weight: 400; font-size: clamp(28px, 4vw, 42px); color: var(--ink); margin-top: 6px;">The Backlog Ledger</h1>
+    </header>
+
+    <nav class="wizard-progress" id="progress" aria-label="Setup progress"></nav>
 
     <form id="setup-form" class="card" onsubmit="return false;">
 
-      <!-- Group name -->
-      <div class="field">
-        <label for="group_name">Group name</label>
-        <input id="group_name" name="group_name" type="text" placeholder="The Backlog Ledger" value="The Backlog Ledger" />
-        <small>Shown in the header and Discord posts.</small>
-      </div>
-
-      <!-- Steam API key -->
-      <div class="field">
-        <label for="steam_api_key">Steam Web API key <span class="req">*</span></label>
-        <input id="steam_api_key" name="steam_api_key" type="text" placeholder="32-character key" autocomplete="off" required />
-        <small>Get one free at <a href="https://steamcommunity.com/dev/apikey" target="_blank" rel="noopener">steamcommunity.com/dev/apikey</a></small>
-        <div class="test-row">
-          <button type="button" class="btn-test" onclick="testSteam()">Test Steam key</button>
-          <span id="steam-result" class="test-result"></span>
+      <!-- =========================================================
+           Step 1 — Welcome
+           ========================================================= -->
+      <section class="step-panel" data-step="1">
+        <h2 class="step-title">Welcome</h2>
+        <p class="step-lede">A short setup so the office is furnished before the contract is signed.</p>
+        <div class="step-body">
+          <p>Backlog Ledger helps a group of friends turn their Steam backlogs into a shared challenge.
+            One person hosts the ledger, and everyone else joins through their browser.</p>
+          <p>This wizard only runs once. Nothing leaves your server &mdash; keys, names, and prices stay yours.</p>
         </div>
-      </div>
-
-      <!-- Discord bot token -->
-      <div class="field">
-        <label for="discord_bot_token">Discord bot token <span class="req">*</span></label>
-        <input id="discord_bot_token" name="discord_bot_token" type="password" placeholder="Bot token from Discord Developer Portal" autocomplete="off" required />
-        <small>From your bot's "Bot" page on <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">discord.com/developers</a></small>
-      </div>
-
-      <!-- Discord channel ID -->
-      <div class="field">
-        <label for="discord_channel_id">Discord channel ID <span class="req">*</span></label>
-        <input id="discord_channel_id" name="discord_channel_id" type="text" placeholder="18-19 digit channel ID" autocomplete="off" required />
-        <small>Right-click the channel in Discord → "Copy Channel ID" (Developer Mode must be on)</small>
-        <div class="test-row">
-          <button type="button" class="btn-test" onclick="testDiscord(false)">Test connection</button>
-          <button type="button" class="btn-test" onclick="testDiscord(true)">Send test message</button>
-          <span id="discord-result" class="test-result"></span>
+        <div class="wizard-nav">
+          <span></span>
+          <div class="right">
+            <button type="button" class="btn-primary" data-next>Get Started</button>
+          </div>
         </div>
-      </div>
+      </section>
 
-      <!-- Admin password -->
-      <div class="field">
-        <label for="admin_password">Admin password <span class="req">*</span></label>
-        <input id="admin_password" name="admin_password" type="password" placeholder="At least 6 characters" autocomplete="new-password" required />
-        <small>Protects the debug page and future admin actions. <strong>Only you need this — don't share it.</strong></small>
-      </div>
+      <!-- =========================================================
+           Step 2 — Hosting mode
+           ========================================================= -->
+      <section class="step-panel" data-step="2">
+        <h2 class="step-title">How will people reach the ledger?</h2>
+        <p class="step-lede">Pick the rough shape now &mdash; you can always change your mind later.</p>
+        <div class="step-body">
+          <div class="choice-list">
+            <label class="choice" data-choice="local">
+              <input type="radio" name="hosting_mode" value="local" checked />
+              <span class="choice-title">Local &nbsp;/&nbsp; home network</span>
+              <span class="choice-desc">People can only reach the ledger while they're on the same Wi-Fi or LAN as the host. Easiest to set up.</span>
+            </label>
+            <label class="choice" data-choice="internet">
+              <input type="radio" name="hosting_mode" value="internet" />
+              <span class="choice-title">Friends over the internet</span>
+              <span class="choice-desc">Friends can join from anywhere. You'll need something like port-forwarding, a VPN, a reverse proxy, or a Cloudflare Tunnel later &mdash; we'll guide you when you're ready.</span>
+            </label>
+          </div>
+          <p class="muted small" style="margin-top: 12px;">For now we just remember your choice. The wizard does not change any networking yet.</p>
 
-      <!-- ITAD API key (optional) -->
-      <div class="field">
-        <label for="itad_api_key">IsThereAnyDeal API key (optional)</label>
-        <input id="itad_api_key" name="itad_api_key" type="text" placeholder="Get one free at isthereanydeal.com/apps/my/" autocomplete="off" />
-        <small>Used to estimate missing prices using historical lowest prices. Without this, the app falls back to Steam's current store price. <a href="https://isthereanydeal.com/apps/my/" target="_blank">Register for a free key here.</a></small>
-      </div>
+          <div class="field" style="margin-top: 20px;">
+            <label for="server_port">Server port</label>
+            <input id="server_port" name="server_port" type="number" min="1024" max="65535" placeholder="47821" value="47821" />
+            <small>
+              The port the ledger listens on. <strong>47821</strong> is the suggested default &mdash; only change this if it conflicts with something else on your machine.
+            </small>
+            <p id="port-fallback-note" class="warn small" style="display:none; margin-top: 8px;">
+              Heads up: port <strong><span id="port-fallback-suggested"></span></strong> was already in use when the app started,
+              so the setup wizard is temporarily on port <strong><span id="port-fallback-active"></span></strong>.
+              Pick a free port below &mdash; the app will switch to it the moment you finish setup.
+            </p>
+          </div>
+        </div>
+        <div class="wizard-nav">
+          <button type="button" class="btn-test" data-back>Back</button>
+          <div class="right"><button type="button" class="btn-primary" data-next>Continue</button></div>
+        </div>
+      </section>
 
-      <div class="actions">
-        <button type="button" class="btn-primary" onclick="completeSetup()">Complete setup</button>
-        <span id="submit-result" class="test-result"></span>
-      </div>
+      <!-- =========================================================
+           Step 3 — Steam API key
+           ========================================================= -->
+      <section class="step-panel" data-step="3">
+        <h2 class="step-title">Steam Web API key</h2>
+        <p class="step-lede">So the ledger can read your friends' public Steam libraries.</p>
+        <div class="step-body">
+          <div class="field">
+            <label for="steam_api_key">Steam Web API key <span class="req">*</span></label>
+            <input id="steam_api_key" name="steam_api_key" type="text" placeholder="32-character key" autocomplete="off" required />
+            <small>
+              This is <strong>not</strong> your Steam password. Backlog Ledger uses this key to read public Steam library
+              information. Get one free at
+              <a href="https://steamcommunity.com/dev/apikey" target="_blank" rel="noopener">steamcommunity.com/dev/apikey</a>.
+            </small>
+            <div class="test-row">
+              <button type="button" class="btn-test" id="btn-test-steam">Test API Key</button>
+              <span id="steam-result" class="test-result"></span>
+            </div>
+          </div>
+          <p class="muted small" id="steam-untested-warn" style="display:none;">
+            You haven't tested the key yet. You can still continue, but the ledger won't work until the key is valid.
+          </p>
+        </div>
+        <div class="wizard-nav">
+          <button type="button" class="btn-test" data-back>Back</button>
+          <div class="right"><button type="button" class="btn-primary" data-next>Continue</button></div>
+        </div>
+      </section>
+
+      <!-- =========================================================
+           Step 4 — Admin password (server-level secret only)
+           Profile creation lives in Part 2 (/first-profile) so it can guide
+           the user through Steam linking, library sync, and imports properly.
+           ========================================================= -->
+      <section class="step-panel" data-step="4">
+        <h2 class="step-title">Set an admin password</h2>
+        <p class="step-lede">A simple password that protects server-side admin actions.</p>
+        <div class="step-body">
+          <div class="field">
+            <label for="admin_password">Admin password <span class="req">*</span></label>
+            <input id="admin_password" name="admin_password" type="password" placeholder="At least 6 characters" autocomplete="new-password" required />
+            <small>
+              Protects admin actions like the debug page and any future settings page.
+              <strong>Only the host needs this &mdash; don't share it.</strong>
+              This is a server password, not your ledger profile &mdash; you'll create your profile in a moment.
+            </small>
+          </div>
+        </div>
+        <div class="wizard-nav">
+          <button type="button" class="btn-test" data-back>Back</button>
+          <div class="right"><button type="button" class="btn-primary" data-next>Continue</button></div>
+        </div>
+      </section>
+
+      <!-- =========================================================
+           Step 5 — Defaults
+           ========================================================= -->
+      <section class="step-panel" data-step="5">
+        <h2 class="step-title">Basic ledger defaults</h2>
+        <p class="step-lede">Sensible starting values &mdash; tweak any of these later.</p>
+        <div class="step-body">
+          <div class="field">
+            <label for="default_currency">Default currency</label>
+            <input id="default_currency" name="default_currency" type="text" value="GBP" maxlength="8" />
+            <small>Three-letter code (GBP, USD, EUR&hellip;). The ledger displays prices in this currency.</small>
+          </div>
+          <div class="field">
+            <label for="min_played_hours">Minimum played-hours threshold (optional)</label>
+            <input id="min_played_hours" name="min_played_hours" type="number" step="0.1" min="0" placeholder="leave blank to use the default" />
+            <small>Stored for future use. Doesn't change ledger behaviour yet.</small>
+          </div>
+          <div class="field">
+            <label>Free games</label>
+            <div class="toggle-row">
+              <input id="free_no_price" name="free_no_price" type="checkbox" checked />
+              <label for="free_no_price" style="margin: 0; text-transform: none; letter-spacing: 0; font-family: 'Inter Tight', sans-serif; font-size: 14px; color: var(--ink);">
+                Treat games with no price as Free
+              </label>
+            </div>
+            <small>Matches the ledger's current behaviour. Recommended.</small>
+          </div>
+        </div>
+        <div class="wizard-nav">
+          <button type="button" class="btn-test" data-back>Back</button>
+          <div class="right"><button type="button" class="btn-primary" data-next>Continue</button></div>
+        </div>
+      </section>
+
+      <!-- =========================================================
+           Step 6 — Finish (Part 1)
+           Hands off to Part 2 (/first-profile) for actual profile creation.
+           ========================================================= -->
+      <section class="step-panel" data-step="6">
+        <h2 class="step-title">Server setup complete</h2>
+        <p class="step-lede">One more short wizard to create your profile, then you're in.</p>
+        <div class="step-body" id="finish-body">
+          <p>We'll save your settings, then walk you through creating your first profile &mdash;
+            linking your Steam account, syncing your library, and (optionally) importing your purchase history.</p>
+          <p>The ledger is reachable at: <span class="url-line" id="local-url">http://localhost</span></p>
+        </div>
+        <div class="wizard-nav">
+          <button type="button" class="btn-test" data-back>Back</button>
+          <div class="right">
+            <button type="button" class="btn-primary" id="btn-finish">Continue to profile setup</button>
+            <span id="submit-result" class="test-result"></span>
+          </div>
+        </div>
+      </section>
+
     </form>
   </main>
 
   <script>
-    function val(id) { return document.getElementById(id).value.trim(); }
+    // ---------- Wizard state ----------
+    // We keep state in one object so each step is a pure read/write against this.
+    // Reaching the final step posts the whole thing to /api/setup/complete in one go.
+    // Part 1 of two — server settings only. Profile creation happens in Part 2 (/first-profile).
+    const STEP_TITLES = ['Welcome', 'Hosting', 'Steam Key', 'Admin', 'Defaults', 'Finish'];
+    const TOTAL = STEP_TITLES.length;
+    const state = {
+      hosting_mode: 'local',
+      server_port: 47821,
+      steam_api_key: '',
+      steam_tested_ok: false,
+      admin_password: '',
+      default_currency: 'GBP',
+      min_played_hours: '',
+      free_no_price: true,
+    };
+    let currentStep = 1;
+
+    // ---------- Helpers ----------
+    const $ = (id) => document.getElementById(id);
+    function val(id) { const el = $(id); return el ? el.value.trim() : ''; }
     function showResult(id, ok, msg) {
-      const el = document.getElementById(id);
+      const el = $(id);
+      if (!el) return;
       el.textContent = msg;
       el.className = 'test-result ' + (ok ? 'ok' : 'err');
     }
 
-    async function testSteam() {
+    // ---------- Progress nav rendering ----------
+    function renderProgress() {
+      const nav = $('progress');
+      nav.innerHTML = '';
+      STEP_TITLES.forEach((title, i) => {
+        const stepNum = i + 1;
+        const div = document.createElement('div');
+        div.className = 'step' + (stepNum === currentStep ? ' active' : (stepNum < currentStep ? ' done' : ''));
+        div.textContent = stepNum + '. ' + title;
+        nav.appendChild(div);
+      });
+    }
+
+    // ---------- Step navigation ----------
+    function showStep(n) {
+      currentStep = n;
+      document.querySelectorAll('.step-panel').forEach(p => {
+        p.classList.toggle('active', Number(p.dataset.step) === n);
+      });
+      renderProgress();
+      if (n === TOTAL) populateFinish();
+      // Scroll to top of card on step change so long forms don't leave the user lost.
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    // Per-step "can I advance?" checks. Returning an error string blocks advance and shows it.
+    const validators = {
+      1: () => null,
+      2: () => {
+        const portRaw = val('server_port');
+        if (!portRaw) return 'Please enter a port number (47821 is the suggested default).';
+        const n = Number(portRaw);
+        if (!Number.isInteger(n) || n < 1024 || n > 65535) {
+          return 'Port must be a whole number between 1024 and 65535.';
+        }
+        state.server_port = n;
+        return null;
+      },
+      3: () => {
+        const key = val('steam_api_key');
+        if (!key) return 'Please enter your Steam Web API key.';
+        state.steam_api_key = key;
+        // Show a soft warning if the user hasn't actually tested the key.
+        $('steam-untested-warn').style.display = state.steam_tested_ok ? 'none' : 'block';
+        return null;
+      },
+      4: () => {
+        const pw = val('admin_password');
+        if (pw.length < 6) return 'Admin password must be at least 6 characters.';
+        state.admin_password = pw;
+        return null;
+      },
+      5: () => {
+        state.default_currency = val('default_currency') || 'GBP';
+        state.min_played_hours = val('min_played_hours');
+        state.free_no_price = $('free_no_price').checked;
+        return null;
+      },
+      6: () => null,
+    };
+
+    function goNext() {
+      const err = validators[currentStep]?.();
+      if (err) { alert(err); return; }
+      if (currentStep < TOTAL) showStep(currentStep + 1);
+    }
+    function goBack() {
+      if (currentStep > 1) showStep(currentStep - 1);
+    }
+
+    // ---------- Wire up nav buttons ----------
+    document.querySelectorAll('[data-next]').forEach(b => b.addEventListener('click', goNext));
+    document.querySelectorAll('[data-back]').forEach(b => b.addEventListener('click', goBack));
+
+    // Hosting mode radios — keep state in sync and add a "selected" visual.
+    document.querySelectorAll('input[name="hosting_mode"]').forEach(r => {
+      r.addEventListener('change', () => {
+        state.hosting_mode = r.value;
+        document.querySelectorAll('.choice').forEach(c => {
+          c.classList.toggle('selected', c.dataset.choice === r.value);
+        });
+      });
+    });
+    // Initialise selected style on load.
+    document.querySelector('.choice[data-choice="local"]').classList.add('selected');
+
+    // ---------- Step 3 — test Steam API key ----------
+    $('btn-test-steam').addEventListener('click', async () => {
+      const key = val('steam_api_key');
+      if (!key) return showResult('steam-result', false, '✗ Enter a key first');
       showResult('steam-result', true, 'Testing…');
       try {
         const res = await fetch('/api/setup/test-steam', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ steam_api_key: val('steam_api_key') })
-        });
-        const data = await res.json();
-        if (data.ok) showResult('steam-result', true, '✓ Steam API key works');
-        else showResult('steam-result', false, '✗ ' + data.error);
-      } catch (err) { showResult('steam-result', false, '✗ ' + err.message); }
-    }
-
-    async function testDiscord(sendMessage) {
-      showResult('discord-result', true, sendMessage ? 'Sending test message…' : 'Testing…');
-      try {
-        const res = await fetch('/api/setup/test-discord', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            discord_bot_token: val('discord_bot_token'),
-            discord_channel_id: val('discord_channel_id'),
-            send_message: sendMessage
-          })
+          body: JSON.stringify({ steam_api_key: key })
         });
         const data = await res.json();
         if (data.ok) {
-          const msg = `✓ Connected as "${data.bot_name}" to #${data.channel_name}` +
-                      (sendMessage ? ' — message sent!' : '');
-          showResult('discord-result', true, msg);
-        } else showResult('discord-result', false, '✗ ' + data.error);
-      } catch (err) { showResult('discord-result', false, '✗ ' + err.message); }
+          state.steam_tested_ok = true;
+          state.steam_api_key = key;
+          showResult('steam-result', true, '✓ Steam API key works');
+          $('steam-untested-warn').style.display = 'none';
+        } else {
+          state.steam_tested_ok = false;
+          showResult('steam-result', false, '✗ ' + (data.error || 'Test failed'));
+        }
+      } catch (err) {
+        state.steam_tested_ok = false;
+        showResult('steam-result', false, '✗ ' + err.message);
+      }
+    });
+
+    // ---------- Finish step — populate URL ----------
+    function populateFinish() {
+      // Local URL — always show whatever the browser is on (origin), since this is the URL
+      // the host computer itself uses. We deliberately skip LAN detection: that would need
+      // server-side network introspection, which is exactly the kind of overengineering
+      // the spec asked us to avoid for now.
+      $('local-url').textContent = window.location.origin;
     }
 
-    async function completeSetup() {
-      const pw = val('admin_password');
-      if (pw.length < 6) return showResult('submit-result', false, '✗ Password must be at least 6 characters');
-      if (!val('steam_api_key') || !val('discord_bot_token') || !val('discord_channel_id'))
-        return showResult('submit-result', false, '✗ All required fields must be filled');
-
+    // ---------- Finish step — submit ----------
+    $('btn-finish').addEventListener('click', async () => {
+      // Final validation across every step so we don't POST a half-filled payload.
+      for (let s = 1; s <= TOTAL - 1; s++) {
+        const err = validators[s]?.();
+        if (err) { showResult('submit-result', false, '✗ ' + err); showStep(s); return; }
+      }
       showResult('submit-result', true, 'Saving…');
+      const payload = {
+        hosting_mode: state.hosting_mode,
+        port: state.server_port,
+        steam_api_key: state.steam_api_key,
+        admin_password: state.admin_password,
+        defaults: {
+          currency: state.default_currency,
+          min_played_hours: state.min_played_hours === '' ? null : Number(state.min_played_hours),
+          free_no_price: state.free_no_price,
+        },
+      };
       try {
         const res = await fetch('/api/setup/complete', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            group_name: val('group_name'),
-            steam_api_key: val('steam_api_key'),
-            discord_bot_token: val('discord_bot_token'),
-            discord_channel_id: val('discord_channel_id'),
-            admin_password: pw,
-            itad_api_key: val('itad_api_key') || null
-          })
+          body: JSON.stringify(payload),
         });
         const data = await res.json();
-        if (data.ok) {
-          showResult('submit-result', true, '✓ Setup complete! Redirecting…');
-          setTimeout(() => { window.location.href = '/'; }, 1200);
-        } else showResult('submit-result', false, '✗ ' + (data.error || 'Setup failed'));
-      } catch (err) { showResult('submit-result', false, '✗ ' + err.message); }
-    }
+        if (res.ok && data.ok) {
+          if (data.port_will_swap) {
+            // Server is re-binding to the new port (~750ms). Wait for it, then
+            // redirect to Part 2 on the new URL — the user never has to restart.
+            const newUrl = `${window.location.protocol}//${window.location.hostname}:${data.chosen_port}/first-profile`;
+            showResult('submit-result', true,
+              `✓ Server ready on port ${data.chosen_port}. Loading profile setup…`);
+            setTimeout(() => { window.location.href = newUrl; }, 1800);
+          } else {
+            showResult('submit-result', true, '✓ Server ready! Loading profile setup…');
+            setTimeout(() => { window.location.href = '/first-profile'; }, 900);
+          }
+        } else {
+          const msg = data.error || 'Setup failed';
+          const hint = data.hint ? '  ' + data.hint : '';
+          showResult('submit-result', false, '✗ ' + msg + hint);
+        }
+      } catch (err) {
+        showResult('submit-result', false, '✗ ' + err.message);
+      }
+    });
+
+    // ---------- Init ----------
+    // Pull the suggested + actual port from the server so the wizard reflects what
+    // the host would start on, AND surfaces a warning if the boot used a fallback port.
+    (async () => {
+      try {
+        const res = await fetch('/api/setup/status');
+        const data = await res.json();
+        if (data?.suggested_port) {
+          $('server_port').value = data.suggested_port;
+          state.server_port = data.suggested_port;
+        }
+        if (data?.on_fallback_port && data.current_port && data.suggested_port) {
+          $('port-fallback-suggested').textContent = data.suggested_port;
+          $('port-fallback-active').textContent = data.current_port;
+          $('port-fallback-note').style.display = 'block';
+        }
+      } catch { /* fall back to the default already in the input */ }
+    })();
+
+    showStep(1);
   </script>
 </body>
 </html>

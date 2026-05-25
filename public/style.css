@@ -1444,6 +1444,45 @@ pre {
   color: var(--bg);
   text-decoration: none;
 }
+.help-fab-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 1.5px solid rgba(19, 17, 17, 0.96);
+  background: #b9d066;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.45);
+}
+.help-fab-badge.status-running {
+  background: #4aa3d4;
+  animation: bl-help-pulse 1.2s ease-in-out infinite;
+}
+.help-fab-badge.status-paused { background: #d4a64a; }
+.help-fab-badge.status-done   { background: #b9d066; }
+.help-fab-badge.status-error  { background: #d46a4a; }
+@keyframes bl-help-pulse {
+  0%, 100% { transform: scale(1);   opacity: 1;   }
+  50%      { transform: scale(1.35); opacity: 0.55; }
+}
+.help-metadata-status {
+  margin: 0 0 18px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid rgba(212, 166, 74, 0.35);
+  background: rgba(19, 17, 17, 0.55);
+  color: var(--gold);
+}
+.help-metadata-status.status-idle    { opacity: 0.7; }
+.help-metadata-status.status-running { border-color: rgba(74, 163, 212, 0.55); color: #8ec5e5; }
+.help-metadata-status.status-paused  { border-color: rgba(212, 166, 74, 0.65); color: #f0c878; }
+.help-metadata-status.status-done    { border-color: rgba(185, 208, 102, 0.55); color: #c9dd7e; }
+.help-metadata-status.status-error   { border-color: rgba(212, 106, 74, 0.65); color: #e89178; }
 .help-modal {
   width: min(920px, 94vw);
   padding: 0;
