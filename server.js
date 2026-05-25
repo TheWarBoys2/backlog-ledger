@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+const gameMatcher = require('./lib/gameMatcher');
 
 const DEFAULT_PORT = 47821;
 const CONFIG_PATH = path.join(__dirname, 'config.json');
@@ -1709,16 +1710,46 @@ app.get('/api/users/:id/sync-log', requireSetup, (req, res) => {
   res.json({ entries: rows });
 });
 
+
+
 // ---------- PHASE 5: Purchase history parser (ported from original Backlog Ledger) ----------
 
-// Normalise for lookup: lowercase, strip trademark, collapse whitespace.
-// Used ONLY for the match-key. Display name is preserved as-is.
+// Loose key used ONLY for aggregating receipt rows (e.g. combining
+// multiple purchase lines for the same item). Library matching uses
+// the richer pipeline in lib/gameMatcher.js — see buildLibraryMatcher.
 function normKey(s) {
   return String(s || '')
     .toLowerCase()
     .replace(/[™®©]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// ---------- Library matcher (lib/gameMatcher.js) ----------
+// Aliases are loaded from lib/manual-aliases.json at boot and on demand
+// via /api/admin/reload-aliases. The structure is { "<normalized input>": "<library name>" }.
+let MANUAL_ALIASES = gameMatcher.loadAliases();
+function reloadManualAliases() {
+  MANUAL_ALIASES = gameMatcher.loadAliases();
+  return MANUAL_ALIASES;
+}
+
+// Ring buffer of recent failed / uncertain matches, surfaced via
+// /api/admin/match-diagnostics for the debug page.
+const RECENT_MATCH_DIAGNOSTICS = [];
+const MAX_MATCH_DIAGNOSTICS = 500;
+function recordMatchDiagnostic(entry) {
+  RECENT_MATCH_DIAGNOSTICS.push({ ...entry, at: Date.now() });
+  while (RECENT_MATCH_DIAGNOSTICS.length > MAX_MATCH_DIAGNOSTICS) RECENT_MATCH_DIAGNOSTICS.shift();
+}
+
+function buildLibraryMatcher(userId) {
+  const libRows = db.prepare(`SELECT DISTINCT g.app_id, g.name FROM games g
+    JOIN user_games ug ON ug.app_id = g.app_id WHERE ug.user_id = ?`).all(userId);
+  return {
+    matcher: gameMatcher.buildMatcher(libRows, { aliases: MANUAL_ALIASES }),
+    libRows,
+  };
 }
 
 // Single-pass parser based on the original Backlog Ledger.
@@ -1852,70 +1883,27 @@ function aggregatePurchases(transactions) {
   return { map, stats };
 }
 
-// Match aggregated entries against the user's library.
-// Three-stage matching, all DETERMINISTIC (no fuzzy scores):
-//   1. Exact normKey match
-//   2. Simplified key match (strip edition suffixes, regional tags)
-//   3. Substring containment (one name fully contains the other)
-function simplifyKey(s) {
-  return normKey(s)
-    .replace(/\s*[:\-–—]\s+.+$/, '')  // strip everything after a colon or dash
-    .replace(/\s*\([^)]*\)\s*/g, ' ') // strip parenthesised content
-    .replace(/\b(standard|deluxe|ultimate|complete|definitive|enhanced|remastered|edition|pack|bundle|goty|gold|platinum|collection|launch|legacy|classic|game of the year|anniversary|preorder|pre-purchase|row|ww|uk|eu)\b/g, ' ')
-    .replace(/\s+/g, ' ').trim();
-}
+// Match aggregated entries against the user's library using the
+// ranked pipeline in lib/gameMatcher.js. Tiers (highest priority first):
+//   0. Per-user learned override (match_overrides table)
+//   1. AppID exact (when caller supplies an AppID — receipts don't, but
+//      the matcher is designed to support it for future paths)
+//   2. Raw title exact
+//   3. Normalized title exact
+//   4. Edition-stripped normalized
+//   5. Token-based fuzzy (strict threshold + min shared tokens)
+//   6. Manual alias table (lib/manual-aliases.json)
+function matchAgainstLibrary(userId, aggregateMap, opts = {}) {
+  const source = opts.source || 'purchase';
+  const { matcher, libRows } = buildLibraryMatcher(userId);
 
-function matchAgainstLibrary(userId, aggregateMap) {
-  const libRows = db.prepare(`SELECT DISTINCT g.app_id, g.name FROM games g
-    JOIN user_games ug ON ug.app_id = g.app_id WHERE ug.user_id = ?`).all(userId);
-
-  // Pre-load learned overrides for this user (stage 0 of matching).
-  // Maps lowercased receipt name → app_id from a prior manual match.
-  const overrides = new Map();
-  const overrideRows = db.prepare('SELECT raw_name_lc, app_id FROM match_overrides WHERE user_id = ?').all(userId);
-  for (const r of overrideRows) overrides.set(r.raw_name_lc, r.app_id);
-  // Library by app_id for override lookup
+  // Per-user learned overrides take priority over the pipeline so prior
+  // manual corrections stay sticky.
   const libByAppId = new Map();
   for (const g of libRows) libByAppId.set(g.app_id, g);
-
-  // Three lookups, prioritised in order
-  const exact = new Map();      // normKey → lib
-  const simplified = new Map(); // simplifyKey → lib
-  for (const g of libRows) {
-    exact.set(normKey(g.name), g);
-    const sk = simplifyKey(g.name);
-    if (sk && !simplified.has(sk)) simplified.set(sk, g);
-  }
-
-  function findMatch(rawName) {
-    // Stage 0: learned override from a prior manual match
-    const lc = String(rawName || '').toLowerCase().trim();
-    if (overrides.has(lc)) {
-      const appId = overrides.get(lc);
-      const g = libByAppId.get(appId);
-      if (g) return { ...g, _learned: true };
-    }
-    // Stage 1: exact normalised match
-    const ek = normKey(rawName);
-    if (exact.has(ek)) return exact.get(ek);
-    // Stage 2: simplified match
-    const sk = simplifyKey(rawName);
-    if (sk && simplified.has(sk)) return simplified.get(sk);
-    // Stage 3: substring containment with ≥2 shared meaningful tokens
-    if (sk) {
-      const tokens = sk.split(' ').filter(t => t.length > 2);
-      if (tokens.length < 2) return null;
-      for (const [libKey, libGame] of simplified.entries()) {
-        if (libKey.length < 4) continue;
-        if (sk.includes(libKey) || libKey.includes(sk)) {
-          const libTokens = libKey.split(' ').filter(t => t.length > 2);
-          let shared = 0;
-          for (const t of tokens) if (libTokens.includes(t)) shared++;
-          if (shared >= 2) return libGame;
-        }
-      }
-    }
-    return null;
+  const overrides = new Map();
+  for (const r of db.prepare('SELECT raw_name_lc, app_id FROM match_overrides WHERE user_id = ?').all(userId)) {
+    overrides.set(r.raw_name_lc, r.app_id);
   }
 
   const results = [];
@@ -1939,10 +1927,39 @@ function matchAgainstLibrary(userId, aggregateMap) {
     }
     if (entry.total === 0) continue;
 
-    const lib = findMatch(entry.name);
-    if (!lib) {
-      logger.debug('No library match', { receipt: entry.name, simplified: simplifyKey(entry.name) });
+    let lib = null;
+    let tier = null;
+    let debug = null;
+
+    const lc = String(entry.name || '').toLowerCase().trim();
+    if (overrides.has(lc)) {
+      const g = libByAppId.get(overrides.get(lc));
+      if (g) { lib = { ...g, _learned: true }; tier = 'learned-override'; }
     }
+
+    if (!lib) {
+      const r = matcher.match({ rawName: entry.name, appId: entry.appId }, { trackDiagnostics: false });
+      debug = r.debug;
+      if (r.match) { lib = r.match; tier = r.tier; }
+    }
+
+    if (!lib) {
+      const diag = {
+        source,
+        user_id: userId,
+        original_input: entry.name,
+        normalized: debug?.normalized || null,
+        edition_stripped: debug?.edition_stripped || null,
+        best_candidate: debug?.best_candidate || null,
+        best_candidate_normalized: debug?.best_candidate_normalized || null,
+        score: debug?.score || 0,
+        tier_attempted: debug?.tier_attempted || 'none',
+        reason: debug?.reason || 'no match',
+      };
+      recordMatchDiagnostic(diag);
+      logger.debug('No library match', diag);
+    }
+
     results.push({
       raw_name: entry.name,
       total_cents: Math.round(entry.total * 100),
@@ -1951,6 +1968,7 @@ function matchAgainstLibrary(userId, aggregateMap) {
       gifts: entry.gifts || [],
       skip: false,
       match: lib ? { app_id: lib.app_id, name: lib.name } : null,
+      match_tier: tier,
       needs_manual_match: !lib,
     });
   }
@@ -2156,12 +2174,13 @@ function matchLicenseRowsAgainstLibrary(userId, licenseRows) {
     }
   }
 
-  return matchAgainstLibrary(userId, freeMap).map(r => {
+  return matchAgainstLibrary(userId, freeMap, { source: 'license' }).map(r => {
     const meta = metadataByKey.get(normKey(r.raw_name)) || {};
     return {
       raw_name: meta.raw_name || r.raw_name,
       match_name: meta.match_name || r.raw_name,
       match: r.match,
+      match_tier: r.match_tier,
       needs_manual_match: !r.match,
       skip: false,
       acquisition_method: meta.acquisition_method || 'Complimentary'
@@ -2746,6 +2765,44 @@ app.get('/api/debug/errors', requireAdmin, (req, res) => {
   const file = path.join(LOGS_DIR, `errors-${todayStamp()}.log`);
   if (!fs.existsSync(file)) return res.json({ lines: [] });
   res.json({ lines: fs.readFileSync(file,'utf8').trim().split('\n').slice(-50) });
+});
+
+// Recent unmatched / uncertain import rows, captured by the matcher
+// pipeline. Supports ?format=csv for download.
+app.get('/api/debug/unmatched-imports', requireAdmin, (req, res) => {
+  const rows = RECENT_MATCH_DIAGNOSTICS.slice().reverse(); // newest first
+  if ((req.query.format || '').toLowerCase() === 'csv') {
+    const cols = ['at', 'source', 'user_id', 'original_input', 'normalized', 'edition_stripped',
+                  'best_candidate', 'best_candidate_normalized', 'score', 'tier_attempted', 'reason'];
+    const escape = (v) => {
+      if (v == null) return '';
+      const s = String(v).replace(/"/g, '""');
+      return /[",\n]/.test(s) ? `"${s}"` : s;
+    };
+    const out = [cols.join(',')];
+    for (const r of rows) {
+      out.push(cols.map(c => c === 'at' ? new Date(r.at).toISOString() : escape(r[c])).join(','));
+    }
+    res.set('Content-Type', 'text/csv');
+    res.set('Content-Disposition', 'attachment; filename="unmatched-imports.csv"');
+    return res.send(out.join('\n'));
+  }
+  res.json({ count: rows.length, rows });
+});
+
+app.post('/api/admin/clear-match-diagnostics', requireAdmin, (req, res) => {
+  RECENT_MATCH_DIAGNOSTICS.length = 0;
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/manual-aliases', requireAdmin, (req, res) => {
+  res.json({ path: gameMatcher.DEFAULT_ALIASES_PATH, count: Object.keys(MANUAL_ALIASES).length, aliases: MANUAL_ALIASES });
+});
+
+app.post('/api/admin/reload-aliases', requireAdmin, (req, res) => {
+  const fresh = reloadManualAliases();
+  logger.info('Manual aliases reloaded', { count: Object.keys(fresh).length });
+  res.json({ ok: true, count: Object.keys(fresh).length });
 });
 
 // ---------- Guards + static ----------
