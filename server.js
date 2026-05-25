@@ -19,6 +19,7 @@ const LOG_RETENTION_DAYS = 7;
 const VERSION = require('./package.json').version;
 const SYNC_RATE_LIMIT_MS = 30000; // 30s between syncs per user
 const STEAM_METADATA_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const GOTW_XP_MULTIPLIER = 2.0;
 
 // ---------- Logging ----------
 if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
@@ -452,9 +453,22 @@ function doesMergeGroupContainDoubleXpGame(playerId, mergeGroup) {
 }
 
 function qualifiesForDoubleXp(playerId, playedAppId, doubleXpAppId) {
+  // Manual merge acceptance scenario:
+  // Metro Exodus (412020) + Metro Exodus Enhanced Edition (1449560) can be
+  // merged per player. If 412020 is GotW/Double XP and the player adds time
+  // to 1449560, this helper makes the XP receipt award x2 XP for that play.
+  // The effective ledger row remains one visible merged contract with a member
+  // breakdown, and GotW pools see only that one effective contract.
   if (!doubleXpAppId) return false;
   if (Number(playedAppId) === Number(doubleXpAppId)) return true;
   return isGameInSameMergeGroup(playerId, playedAppId, doubleXpAppId);
+}
+
+function isUnpaidContractRow(row) {
+  if (!row || row.play_status === 'exempt' || row.play_status === 'free' || row.play_status === 'completed') return false;
+  const price = (row.paid_price_cents || 0) / 100;
+  const hours = (row.playtime_minutes || 0) / 60;
+  return price > 0 && hours < price;
 }
 
 function applyMergeGroupsToGameMap(playerId, byApp, opts = {}) {
@@ -507,6 +521,17 @@ function applyMergeGroupsToGameMap(playerId, byApp, opts = {}) {
         for (const entry of memberRow.account_breakdown) merged.account_breakdown.push({ ...entry, app_id: m.app_id, game_name: memberRow.name });
       }
     }
+    // Manual merge groups are one ledger contract with multiple playable app IDs.
+    // Default contract price/status to the primary game so free enhanced editions
+    // and remasters do not inflate debt. TODO: add an explicit pricing_mode if
+    // groups later need to opt into summed member prices.
+    merged.paid_price_cents = primary.paid_price_cents || 0;
+    merged.play_status = primary.play_status || 'unplayed';
+    merged.completed_at = primary.completed_at || null;
+    merged.notes = primary.notes || null;
+    merged.manual_override = primary.manual_override || 0;
+    merged.price_is_estimated = primary.price_is_estimated || 0;
+    merged.price_estimate_source = primary.price_estimate_source || null;
     if (gotw) {
       merged.qualifies_double_xp = members.some(m =>
         qualifiesForDoubleXp(playerId, m.app_id, gotw.group_app_id) ||
@@ -1388,40 +1413,19 @@ app.patch('/api/users/:id/games/:appId', requireSetup, (req, res) => {
     const gotw = getCurrentGotWPicks();
     // personal_picks keys may be strings (JSON) — match against both
     const currentPersonalPick = gotw?.personal_picks?.[userId] ?? gotw?.personal_picks?.[String(userId)];
-    if (currentPersonalPick === appId) {
-      const ug = db.prepare(`SELECT SUM(playtime_minutes) AS playtime_minutes,
-        SUM(paid_price_cents) AS paid_price_cents,
-        MAX(CASE WHEN play_status = 'completed' THEN 3 WHEN play_status = 'exempt' THEN 2 WHEN play_status = 'free' THEN 1 ELSE 0 END) AS status_rank
-        FROM user_games WHERE user_id = ? AND app_id = ?`).get(userId, appId);
-      if (ug) {
-        const hours = (ug.playtime_minutes || 0) / 60;
-        const price = (ug.paid_price_cents || 0) / 100;
-        const isCompleted = ug.status_rank === 3;
-        const isExempt = ug.status_rank === 2;
-        const settled = isCompleted || isExempt || (price > 0 && hours >= price);
+    if (currentPersonalPick && isGameInSameMergeGroup(userId, currentPersonalPick, appId)) {
+      const rows = getEffectiveLedgerEntriesForPlayer(userId, { gotwPicks: gotw });
+      const effective = rows.find(r => Number(r.app_id) === Number(currentPersonalPick) ||
+        (Array.isArray(r.merged_app_ids) && r.merged_app_ids.map(Number).includes(Number(currentPersonalPick))));
+      if (effective) {
+        const settled = !isUnpaidContractRow(effective);
         if (settled) {
-          // Pick a new personal game — aggregate across accounts first
-          const allRaw = db.prepare(`SELECT app_id, playtime_minutes, paid_price_cents, play_status
-            FROM user_games WHERE user_id = ?`).all(userId);
-          const byApp = new Map();
-          for (const r2 of allRaw) {
-            const ex = byApp.get(r2.app_id);
-            if (!ex) { byApp.set(r2.app_id, { ...r2 }); continue; }
-            ex.playtime_minutes = (ex.playtime_minutes || 0) + (r2.playtime_minutes || 0);
-            ex.paid_price_cents = (ex.paid_price_cents || 0) + (r2.paid_price_cents || 0);
-            if (r2.play_status === 'completed' || ex.play_status === 'completed') ex.play_status = 'completed';
-            else if (r2.play_status === 'exempt' || ex.play_status === 'exempt') ex.play_status = 'exempt';
-            else if (r2.play_status === 'free' || ex.play_status === 'free') ex.play_status = 'free';
-          }
-          const unpaid = [];
-          for (const r2 of byApp.values()) {
-            if (r2.play_status === 'exempt' || r2.play_status === 'free' || r2.play_status === 'completed') continue;
-            const p = (r2.paid_price_cents || 0) / 100;
-            const h = (r2.playtime_minutes || 0) / 60;
-            if (p > 0 && h < p && r2.app_id !== appId) unpaid.push(r2.app_id);
-          }
+          const unpaid = rows
+            .filter(r => isUnpaidContractRow(r))
+            .filter(r => !isGameInSameMergeGroup(userId, r.app_id, currentPersonalPick))
+            .map(r => r.app_id);
           // Exclude group GotW
-          let pool = unpaid.filter(id => id !== gotw.group_app_id);
+          let pool = unpaid.filter(id => !isGameInSameMergeGroup(userId, id, gotw.group_app_id));
           if (!pool.length) pool = unpaid;
           if (pool.length) {
             const newPick = pool[Math.floor(Math.random() * pool.length)];
@@ -1431,7 +1435,7 @@ app.patch('/api/users/:id/games/:appId', requireSetup, (req, res) => {
             db.prepare(`INSERT OR REPLACE INTO games_of_week (week_start_at, group_app_id, personal_picks_json, picked_at)
               VALUES (?, ?, ?, ?)`).run(weekStart, gotw.group_app_id, JSON.stringify(personal), now);
             const newGame = db.prepare('SELECT name FROM games WHERE app_id = ?').get(newPick);
-            logger.info('Personal GotW auto-rerolled (previous game settled)', { user_id: userId, old_app_id: appId, new_app_id: newPick, new_name: newGame?.name });
+            logger.info('Personal GotW auto-rerolled (previous game settled)', { user_id: userId, old_app_id: currentPersonalPick, settled_app_id: appId, new_app_id: newPick, new_name: newGame?.name });
           }
         }
       }
@@ -2513,7 +2517,7 @@ app.locals.broadcastLeaderboardUpdate = broadcastLeaderboardUpdate;
 //   - Baseline = playtime at the moment XP tracking started (set on first sync)
 //   - Hours played since baseline earn XP if the game was a contract (not free/exempt)
 //     and the hours were spent while still under the paid threshold
-//   - Games of the Week (group + personal) earn 1.5x for hours played on them
+//   - Games of the Week (group + personal) earn Double XP for hours played on them
 // XP is computed on-demand from current state — never stored as a counter.
 
 function getCurrentGotWPicks() {
@@ -2575,7 +2579,7 @@ function computeUserXpReceipt(userId, gotwPicks) {
     let bonusType = null;
     if (memberIds.some(id => qualifiesForDoubleXp(userId, id, groupApp))) bonusType = 'Group Game of the Week';
     if (memberIds.some(id => qualifiesForDoubleXp(userId, id, personalApp))) bonusType = bonusType ? 'Group + Personal Game of the Week' : 'Personal Game of the Week';
-    const multiplier = bonusType ? 1.5 : 1.0;
+    const multiplier = bonusType ? GOTW_XP_MULTIPLIER : 1.0;
 
     const earned = baseXp * multiplier;
     const bonus = earned - baseXp;
@@ -2776,32 +2780,24 @@ app.get('/api/users/:id/xp-winner-options', requireSetup, (req, res) => {
   const winner = getCurrentWeeklyXpWinner();
   if (!winner || winner.user_id !== userId) return res.status(403).json({ ok: false, error: 'Not the current winner' });
 
-  const rawRows = db.prepare(`SELECT ug.app_id, ug.playtime_minutes, ug.paid_price_cents, ug.play_status, g.name
-    FROM user_games ug JOIN games g ON g.app_id = ug.app_id WHERE ug.user_id = ?`).all(userId);
-  const byApp = new Map();
-  for (const r of rawRows) {
-    const existing = byApp.get(r.app_id);
-    if (!existing) { byApp.set(r.app_id, { ...r }); continue; }
-    existing.playtime_minutes = (existing.playtime_minutes || 0) + (r.playtime_minutes || 0);
-    existing.paid_price_cents = (existing.paid_price_cents || 0) + (r.paid_price_cents || 0);
-    if (r.play_status === 'completed' || existing.play_status === 'completed') existing.play_status = 'completed';
-    else if (r.play_status === 'exempt' || existing.play_status === 'exempt') existing.play_status = 'exempt';
-    else if (r.play_status === 'free' || existing.play_status === 'free') existing.play_status = 'free';
-  }
   const currentGotW = getCurrentGotWPicks();
   const groupAppId = currentGotW?.group_app_id || null;
   const options = [];
-  for (const r of byApp.values()) {
-    if (r.play_status === 'exempt' || r.play_status === 'free' || r.play_status === 'completed') continue;
+  for (const r of getEffectiveLedgerEntriesForPlayer(userId, { gotwPicks: currentGotW })) {
     const price = (r.paid_price_cents || 0) / 100;
     const hours = (r.playtime_minutes || 0) / 60;
-    if (price > 0 && hours < price && r.app_id !== groupAppId) {
+    if (isUnpaidContractRow(r) && !isGameInSameMergeGroup(userId, r.app_id, groupAppId)) {
       options.push({
         app_id: r.app_id,
         name: r.name,
         hours: Math.round(hours * 10) / 10,
         price: Math.round(price * 100) / 100,
         debt: Math.round((price - hours) * 100) / 100,
+        is_merged: !!r.is_merged,
+        merge_group_id: r.merge_group_id || null,
+        merged_app_ids: r.merged_app_ids || null,
+        merged_count: r.merged_count || null,
+        merged_games: r.merged_games ? r.merged_games.map(g => ({ app_id: g.app_id, name: g.name })) : null,
       });
     }
   }
@@ -2819,35 +2815,32 @@ app.post('/api/users/:id/xp-winner-pick', requireSetup, (req, res) => {
   const appId = parseInt(req.body?.app_id);
   if (!Number.isInteger(appId)) return res.status(400).json({ ok: false, error: 'Valid app_id required' });
 
-  // Verify the game is one of the user's unpaid contracts (security check)
-  const game = db.prepare(`SELECT g.name, SUM(ug.playtime_minutes) AS hours_min, SUM(ug.paid_price_cents) AS price_cents,
-      MAX(CASE WHEN ug.play_status IN ('completed','exempt','free') THEN 1 ELSE 0 END) AS is_settled
-    FROM user_games ug JOIN games g ON g.app_id = ug.app_id
-    WHERE ug.user_id = ? AND ug.app_id = ? GROUP BY g.name`).get(userId, appId);
+  // Verify the game is one of the user's effective unpaid contracts. If a
+  // secondary merged app_id is submitted, store the primary/effective app_id.
+  const currentGotW = getCurrentGotWPicks() || {};
+  const game = getEffectiveLedgerEntriesForPlayer(userId, { gotwPicks: currentGotW })
+    .find(r => Number(r.app_id) === appId || (Array.isArray(r.merged_app_ids) && r.merged_app_ids.map(Number).includes(appId)));
   if (!game) return res.status(404).json({ ok: false, error: 'Game not in your library' });
-  if (game.is_settled) return res.status(400).json({ ok: false, error: 'That game is already settled — pick an unpaid contract' });
-  const totalHours = (game.hours_min || 0) / 60;
-  const totalPrice = (game.price_cents || 0) / 100;
-  if (totalPrice <= 0 || totalHours >= totalPrice) {
+  if (!isUnpaidContractRow(game)) {
     return res.status(400).json({ ok: false, error: 'That game has no debt — pick an unpaid contract' });
   }
+  const effectiveAppId = game.app_id;
 
   // Apply the pick to both tables
   const now = Date.now();
-  const currentGotW = getCurrentGotWPicks() || {};
   const personalPicks = { ...(currentGotW.personal_picks || {}) };
-  personalPicks[userId] = appId;
+  personalPicks[userId] = effectiveAppId;
   const weekStart = now - (now % (7 * 24 * 3600 * 1000));
   db.transaction(() => {
     db.prepare(`INSERT OR REPLACE INTO games_of_week (week_start_at, group_app_id, personal_picks_json, picked_at)
       VALUES (?, ?, ?, ?)`).run(weekStart, currentGotW.group_app_id || null, JSON.stringify(personalPicks), now);
     db.prepare(`UPDATE weekly_xp_winners SET picked_app_id = ?, picked_at = ? WHERE week_start_at = ?`)
-      .run(appId, now, weekStart);
+      .run(effectiveAppId, now, weekStart);
   })();
 
-  logger.info('XP winner made their pick', { user_id: userId, app_id: appId, game: game.name });
+  logger.info('XP winner made their pick', { user_id: userId, app_id: effectiveAppId, submitted_app_id: appId, game: game.name });
   if (app.locals.broadcastLeaderboardUpdate) app.locals.broadcastLeaderboardUpdate(userId, 'xp_winner_pick');
-  res.json({ ok: true, app_id: appId, game: { name: game.name } });
+  res.json({ ok: true, app_id: effectiveAppId, game: { name: game.name } });
 });
 
 // =====================================================================
@@ -2929,29 +2922,13 @@ function pickGamesOfTheWeek() {
     return { ok: false, error: 'No users' };
   }
 
-  // Build user → set of arrears/outstanding app_ids
-  // (Aggregate across Steam accounts: a game is "unpaid" only if the merged playtime < price)
+  // Build user → set of effective arrears/outstanding app_ids. Manual merge
+  // groups are treated as one contract, so Metro Exodus + Enhanced Edition is
+  // one candidate after merging, not two duplicate picks.
   const userUnpaid = new Map();
   for (const u of users) {
-    const rawRows = db.prepare(`SELECT ug.app_id, ug.playtime_minutes, ug.paid_price_cents, ug.play_status
-      FROM user_games ug WHERE ug.user_id = ?`).all(u.id);
-    const byApp = new Map();
-    for (const r of rawRows) {
-      const existing = byApp.get(r.app_id);
-      if (!existing) { byApp.set(r.app_id, { ...r }); continue; }
-      existing.playtime_minutes = (existing.playtime_minutes || 0) + (r.playtime_minutes || 0);
-      existing.paid_price_cents = (existing.paid_price_cents || 0) + (r.paid_price_cents || 0);
-      if (r.play_status === 'completed' || existing.play_status === 'completed') existing.play_status = 'completed';
-      else if (r.play_status === 'exempt' || existing.play_status === 'exempt') existing.play_status = 'exempt';
-      else if (r.play_status === 'free' || existing.play_status === 'free') existing.play_status = 'free';
-    }
     const unpaid = new Set();
-    for (const r of byApp.values()) {
-      if (r.play_status === 'exempt' || r.play_status === 'free' || r.play_status === 'completed') continue;
-      const price = (r.paid_price_cents || 0) / 100;
-      const hours = (r.playtime_minutes || 0) / 60;
-      if (price > 0 && hours < price) unpaid.add(r.app_id);
-    }
+    for (const r of getEffectiveLedgerEntriesForPlayer(u.id)) if (isUnpaidContractRow(r)) unpaid.add(r.app_id);
     userUnpaid.set(u.id, unpaid);
   }
 
@@ -2995,7 +2972,7 @@ function pickGamesOfTheWeek() {
       continue;
     }
     const unpaid = [...userUnpaid.get(u.id)];
-    const pool = unpaid.filter(id => id !== groupAppId);
+    const pool = unpaid.filter(id => !isGameInSameMergeGroup(u.id, id, groupAppId));
     const finalPool = pool.length ? pool : unpaid; // if everything is the group game, allow it
     if (finalPool.length > 0) {
       personalPicks[u.id] = finalPool[Math.floor(Math.random() * finalPool.length)];
@@ -3124,7 +3101,7 @@ function buildDigestEmbed() {
   let gotwLine = '*No game picked yet.*';
   if (data.group_gotw) {
     gotwLine = `🎯 **${data.group_gotw.name}** — the contract everyone must answer to.\n` +
-               `Hours played here this week earn **+50% XP** for all players.`;
+               `Hours played here this week earn **x2 XP** for all players.`;
   }
   // Per-player personal picks
   const personalLines = players
@@ -3415,25 +3392,8 @@ app.post('/api/admin/reroll-group-gotw', requireAdmin, (req, res) => {
     const users = db.prepare('SELECT id FROM users').all();
     const userUnpaid = new Map();
     for (const u of users) {
-      const rawRows = db.prepare(`SELECT ug.app_id, ug.playtime_minutes, ug.paid_price_cents, ug.play_status
-        FROM user_games ug WHERE ug.user_id = ?`).all(u.id);
-      const byApp = new Map();
-      for (const r of rawRows) {
-        const existing = byApp.get(r.app_id);
-        if (!existing) { byApp.set(r.app_id, { ...r }); continue; }
-        existing.playtime_minutes = (existing.playtime_minutes || 0) + (r.playtime_minutes || 0);
-        existing.paid_price_cents = (existing.paid_price_cents || 0) + (r.paid_price_cents || 0);
-        if (r.play_status === 'completed' || existing.play_status === 'completed') existing.play_status = 'completed';
-        else if (r.play_status === 'exempt' || existing.play_status === 'exempt') existing.play_status = 'exempt';
-        else if (r.play_status === 'free' || existing.play_status === 'free') existing.play_status = 'free';
-      }
       const unpaid = new Set();
-      for (const r of byApp.values()) {
-        if (r.play_status === 'exempt' || r.play_status === 'free' || r.play_status === 'completed') continue;
-        const price = (r.paid_price_cents || 0) / 100;
-        const hours = (r.playtime_minutes || 0) / 60;
-        if (price > 0 && hours < price) unpaid.add(r.app_id);
-      }
+      for (const r of getEffectiveLedgerEntriesForPlayer(u.id, { gotwPicks: current })) if (isUnpaidContractRow(r)) unpaid.add(r.app_id);
       userUnpaid.set(u.id, unpaid);
     }
     let candidates = null;
@@ -3533,28 +3493,13 @@ cron.schedule('0 18 * * 5', () => {
   try {
     const winner = getCurrentWeeklyXpWinner();
     if (!winner || winner.picked_app_id) return;
-    // Auto-pick from their unpaid contracts (matching the normal picker logic)
-    const rawRows = db.prepare(`SELECT ug.app_id, ug.playtime_minutes, ug.paid_price_cents, ug.play_status
-      FROM user_games ug WHERE ug.user_id = ?`).all(winner.user_id);
-    const byApp = new Map();
-    for (const r of rawRows) {
-      const existing = byApp.get(r.app_id);
-      if (!existing) { byApp.set(r.app_id, { ...r }); continue; }
-      existing.playtime_minutes = (existing.playtime_minutes || 0) + (r.playtime_minutes || 0);
-      existing.paid_price_cents = (existing.paid_price_cents || 0) + (r.paid_price_cents || 0);
-      if (r.play_status === 'completed' || existing.play_status === 'completed') existing.play_status = 'completed';
-      else if (r.play_status === 'exempt' || existing.play_status === 'exempt') existing.play_status = 'exempt';
-      else if (r.play_status === 'free' || existing.play_status === 'free') existing.play_status = 'free';
-    }
-    const unpaid = [];
+    // Auto-pick from their effective unpaid contracts (matching the normal picker logic).
     const currentGotW = getCurrentGotWPicks();
     const groupApp = currentGotW?.group_app_id || null;
-    for (const r of byApp.values()) {
-      if (r.play_status === 'exempt' || r.play_status === 'free' || r.play_status === 'completed') continue;
-      const price = (r.paid_price_cents || 0) / 100;
-      const hours = (r.playtime_minutes || 0) / 60;
-      if (price > 0 && hours < price && r.app_id !== groupApp) unpaid.push(r.app_id);
-    }
+    const unpaid = getEffectiveLedgerEntriesForPlayer(winner.user_id, { gotwPicks: currentGotW })
+      .filter(r => isUnpaidContractRow(r))
+      .filter(r => !isGameInSameMergeGroup(winner.user_id, r.app_id, groupApp))
+      .map(r => r.app_id);
     if (!unpaid.length) {
       logger.warn('XP winner deadline: no unpaid contracts available to auto-pick');
       return;

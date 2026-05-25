@@ -494,7 +494,7 @@ function renderGotW() {
     items.push(`<div class="gotw-card">
       <div class="gotw-label">🎯 Group Game of the Week</div>
       <div class="gotw-name">${escHtml(g.name)}</div>
-      <div class="gotw-sub">+50% XP for hours played on this title</div>
+      <div class="gotw-sub">Double XP for hours played on this title</div>
       ${settledHtml}
     </div>`);
   }
@@ -504,7 +504,7 @@ function renderGotW() {
     items.push(`<div class="gotw-card">
       <div class="gotw-label">🎲 Your Personal Pick</div>
       <div class="gotw-name">${escHtml(p.name)}</div>
-      <div class="gotw-sub">${p.hours.toFixed(1)}h / £${p.price.toFixed(2)} • +50% XP</div>
+      <div class="gotw-sub">${p.hours.toFixed(1)}h / £${p.price.toFixed(2)} • x2 XP</div>
       ${settledNote}
     </div>`);
   }
@@ -824,7 +824,7 @@ function renderMergeModal() {
   $('merge-unmerge').style.display = g.is_merged ? '' : 'none';
   $('merge-games-list').querySelectorAll('[data-merge-remove]').forEach(btn => {
     btn.addEventListener('click', async () => {
-      await updateMerge(g, { removeAppId: Number(btn.dataset.mergeRemove) });
+      await runMergeAction(() => updateMerge(g, { removeAppId: Number(btn.dataset.mergeRemove) }));
     });
   });
 }
@@ -862,6 +862,17 @@ async function updateMerge(g, payload) {
   else $('modal-merge').style.display = 'none';
 }
 
+async function runMergeAction(action) {
+  setStatus('saving');
+  try {
+    await action();
+    setStatus('ok');
+  } catch (err) {
+    setStatus('error', err.message || 'Merge update failed');
+    renderMergeModal();
+  }
+}
+
 $('merge-cancel').addEventListener('click', () => { $('modal-merge').style.display = 'none'; state.editingMergeAppId = null; });
 $('modal-merge').addEventListener('click', (e) => { if (e.target.id === 'modal-merge') $('modal-merge').style.display = 'none'; });
 $('merge-search').addEventListener('input', renderMergeModal);
@@ -870,28 +881,30 @@ $('merge-search').addEventListener('keydown', async (e) => {
   e.preventDefault();
   const g = state.games.find(x => x.app_id === state.editingMergeAppId);
   if (!g || !$('merge-select').value) return;
-  await updateMerge(g, { addAppId: Number($('merge-select').value) });
+  await runMergeAction(() => updateMerge(g, { addAppId: Number($('merge-select').value) }));
 });
 $('merge-add').addEventListener('click', async () => {
   const g = state.games.find(x => x.app_id === state.editingMergeAppId);
   if (!g || !$('merge-select').value) return;
-  await updateMerge(g, { addAppId: Number($('merge-select').value) });
+  await runMergeAction(() => updateMerge(g, { addAppId: Number($('merge-select').value) }));
 });
 $('merge-save').addEventListener('click', async () => {
   const g = state.games.find(x => x.app_id === state.editingMergeAppId);
   if (!g) return;
   const primaryAppId = Number(document.querySelector('input[name="merge-primary"]:checked')?.value || g.app_id);
-  await updateMerge(g, g.is_merged ? { primaryAppId } : { primaryAppId, addAppId: Number($('merge-select').value) });
+  await runMergeAction(() => updateMerge(g, g.is_merged ? { primaryAppId } : { primaryAppId, addAppId: Number($('merge-select').value) }));
 });
 $('merge-unmerge').addEventListener('click', async () => {
   const g = state.games.find(x => x.app_id === state.editingMergeAppId);
   if (!g?.is_merged) return;
   if (!confirm('Unmerge these games for your ledger? Original game data will stay intact.')) return;
-  const r = await fetch(`/api/users/${state.viewingUserId}/merge-groups/${encodeURIComponent(g.merge_group_id)}`, { method: 'DELETE' });
-  if (!r.ok) throw new Error((await r.json()).error || 'Unmerge failed');
-  $('modal-merge').style.display = 'none';
-  state.editingMergeAppId = null;
-  await reload();
+  await runMergeAction(async () => {
+    const r = await fetch(`/api/users/${state.viewingUserId}/merge-groups/${encodeURIComponent(g.merge_group_id)}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error((await r.json()).error || 'Unmerge failed');
+    $('modal-merge').style.display = 'none';
+    state.editingMergeAppId = null;
+    await reload();
+  });
 });
 
 // ---------- XP winner pick modal ----------
@@ -931,7 +944,7 @@ function renderXpWinnerOptions(filter) {
     return;
   }
   list.innerHTML = filtered.map(o => `<div class="xp-winner-option" data-app-id="${o.app_id}" style="padding:8px 10px;cursor:pointer;border-radius:4px;display:flex;justify-content:space-between;align-items:center;gap:1rem;">
-    <span><strong>${escHtml(o.name)}</strong></span>
+    <span><strong>${escHtml(o.name)}</strong>${o.is_merged ? ` <span class="account-badge merge-badge">Merged game</span>` : ''}</span>
     <span class="muted" style="font-size:0.85rem;font-family:'JetBrains Mono',monospace;">${o.hours.toFixed(1)}h / £${o.price.toFixed(2)} • £${o.debt.toFixed(2)} debt</span>
   </div>`).join('');
   list.querySelectorAll('.xp-winner-option').forEach(el => {
