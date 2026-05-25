@@ -145,6 +145,23 @@ const SCHEMA = `
     group_app_id INTEGER,
     personal_picks_json TEXT NOT NULL,
     picked_at INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS game_merge_groups (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    primary_app_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);
+  CREATE INDEX IF NOT EXISTS idx_merge_groups_user ON game_merge_groups(user_id);
+  CREATE TABLE IF NOT EXISTS game_merge_members (
+    group_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    app_id INTEGER NOT NULL,
+    PRIMARY KEY (user_id, app_id),
+    UNIQUE (group_id, app_id),
+    FOREIGN KEY (group_id) REFERENCES game_merge_groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);
+  CREATE INDEX IF NOT EXISTS idx_merge_members_group ON game_merge_members(group_id);
   CREATE TABLE IF NOT EXISTS user_steam_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -343,6 +360,170 @@ function updateCanonicalPrice(userId, appId, cents, isEstimated, source) {
     .run(cents, isEstimated ? 1 : 0, source || null, userId, appId, accountKey(row.steam_account_id));
   clearDuplicateLedgerFields(userId, appId, row.steam_account_id, { price: true });
   return result.changes;
+}
+
+function mergeStatusPriority(a, b) {
+  if (a === 'completed' || b === 'completed') return 'completed';
+  if (a === 'exempt' || b === 'exempt') return 'exempt';
+  if (a === 'free' || b === 'free') return 'free';
+  return a || b || 'unplayed';
+}
+
+function mergeGameRows(existing, r) {
+  existing.playtime_minutes = (existing.playtime_minutes || 0) + (r.playtime_minutes || 0);
+  existing.playtime_last_2weeks = (existing.playtime_last_2weeks || 0) + (r.playtime_last_2weeks || 0);
+  existing.paid_price_cents = (existing.paid_price_cents || 0) + (r.paid_price_cents || 0);
+  existing.play_status = mergeStatusPriority(existing.play_status, r.play_status);
+  if (r.completed_at && !existing.completed_at) existing.completed_at = r.completed_at;
+  if (r.notes && !existing.notes) existing.notes = r.notes;
+  existing.manual_override = existing.manual_override || r.manual_override;
+  if (r.price_is_estimated) {
+    existing.price_is_estimated = 1;
+    if (r.price_estimate_source && !existing.price_estimate_source) existing.price_estimate_source = r.price_estimate_source;
+  }
+  return existing;
+}
+
+function aggregateUserGamesByApp(userId, includeMeta = false) {
+  const cols = includeMeta
+    ? `g.app_id, g.name, g.genres_json, g.categories_json, g.steam_metadata_last_synced_at,
+       ug.playtime_minutes, ug.playtime_last_2weeks, ug.paid_price_cents, ug.play_status,
+       ug.manual_override, ug.completed_at, ug.notes, COALESCE(ug.price_is_estimated, 0) AS price_is_estimated,
+       ug.price_estimate_source, ug.steam_account_id`
+    : `g.app_id, g.name, ug.playtime_minutes, ug.playtime_last_2weeks, ug.paid_price_cents,
+       ug.play_status, ug.manual_override, ug.completed_at, ug.notes,
+       COALESCE(ug.price_is_estimated, 0) AS price_is_estimated, ug.price_estimate_source`;
+  const raw = db.prepare(`SELECT ${cols}
+    FROM user_games ug JOIN games g ON g.app_id = ug.app_id
+    WHERE ug.user_id = ?`).all(userId);
+  const byApp = new Map();
+  for (const r of raw) {
+    const existing = byApp.get(r.app_id);
+    if (!existing) byApp.set(r.app_id, { ...r });
+    else mergeGameRows(existing, r);
+  }
+  return byApp;
+}
+
+function serialiseMergeGroup(row, members = null) {
+  const groupMembers = members || db.prepare(`SELECT gm.app_id, g.name
+    FROM game_merge_members gm LEFT JOIN games g ON g.app_id = gm.app_id
+    WHERE gm.group_id = ? ORDER BY g.name COLLATE NOCASE`).all(row.id);
+  return {
+    id: row.id,
+    playerId: String(row.user_id),
+    primaryAppId: String(row.primary_app_id),
+    mergedAppIds: groupMembers.map(m => String(m.app_id)),
+    games: groupMembers.map(m => ({ app_id: m.app_id, name: m.name || `App ${m.app_id}` })),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function getMergedGamesForPlayer(playerId) {
+  const groups = db.prepare('SELECT * FROM game_merge_groups WHERE user_id = ? ORDER BY created_at').all(playerId);
+  return groups.map(g => serialiseMergeGroup(g));
+}
+
+function getMergeGroupForGame(playerId, appId) {
+  const row = db.prepare(`SELECT g.* FROM game_merge_groups g
+    JOIN game_merge_members m ON m.group_id = g.id
+    WHERE m.user_id = ? AND m.app_id = ?`).get(playerId, appId);
+  return row ? serialiseMergeGroup(row) : null;
+}
+
+function getPrimaryGameForMergeGroup(group) {
+  const appId = Number(group.primaryAppId || group.primary_app_id);
+  return db.prepare('SELECT app_id, name FROM games WHERE app_id = ?').get(appId) || null;
+}
+
+function isGameInSameMergeGroup(playerId, appIdA, appIdB) {
+  if (Number(appIdA) === Number(appIdB)) return true;
+  const group = getMergeGroupForGame(playerId, appIdA);
+  return !!group && group.mergedAppIds.map(Number).includes(Number(appIdB));
+}
+
+function doesMergeGroupContainDoubleXpGame(playerId, mergeGroup) {
+  const gotw = getCurrentGotWPicks();
+  const personal = gotw?.personal_picks?.[playerId] ?? gotw?.personal_picks?.[String(playerId)];
+  const ids = (mergeGroup.mergedAppIds || []).map(Number);
+  return (gotw?.group_app_id && ids.includes(Number(gotw.group_app_id))) ||
+    (personal && ids.includes(Number(personal)));
+}
+
+function qualifiesForDoubleXp(playerId, playedAppId, doubleXpAppId) {
+  if (!doubleXpAppId) return false;
+  if (Number(playedAppId) === Number(doubleXpAppId)) return true;
+  return isGameInSameMergeGroup(playerId, playedAppId, doubleXpAppId);
+}
+
+function applyMergeGroupsToGameMap(playerId, byApp, opts = {}) {
+  const groups = db.prepare('SELECT * FROM game_merge_groups WHERE user_id = ?').all(playerId);
+  if (!groups.length) return [...byApp.values()];
+  const groupRows = [];
+  const consumed = new Set();
+  const gotw = opts.gotwPicks || null;
+  const personal = gotw ? (gotw.personal_picks?.[playerId] ?? gotw.personal_picks?.[String(playerId)]) : null;
+
+  for (const group of groups) {
+    const members = db.prepare(`SELECT gm.app_id, g.name FROM game_merge_members gm
+      LEFT JOIN games g ON g.app_id = gm.app_id WHERE gm.group_id = ?`).all(group.id);
+    const presentMembers = members.filter(m => byApp.has(m.app_id));
+    if (presentMembers.length < 2) continue;
+    const primary = byApp.get(group.primary_app_id) || byApp.get(presentMembers[0].app_id);
+    const merged = {
+      ...primary,
+      app_id: primary.app_id,
+      name: primary.name,
+      merge_group_id: group.id,
+      is_merged: true,
+      primary_app_id: group.primary_app_id,
+      merged_app_ids: members.map(m => m.app_id),
+      merged_count: presentMembers.length,
+      merged_games: presentMembers.map(m => ({ ...byApp.get(m.app_id), is_primary: m.app_id === group.primary_app_id })),
+      playtime_minutes: 0,
+      playtime_last_2weeks: 0,
+      paid_price_cents: 0,
+      play_status: 'unplayed',
+      manual_override: 0,
+      completed_at: null,
+      notes: null,
+      price_is_estimated: 0,
+      price_estimate_source: null,
+      steam_accounts: [],
+      account_breakdown: [],
+      qualifies_double_xp: false,
+    };
+    for (const m of presentMembers) {
+      consumed.add(m.app_id);
+      const memberRow = byApp.get(m.app_id);
+      mergeGameRows(merged, memberRow);
+      if (Array.isArray(memberRow.steam_accounts)) {
+        for (const account of memberRow.steam_accounts) {
+          if (!merged.steam_accounts.some(a => a.id === account.id)) merged.steam_accounts.push(account);
+        }
+      }
+      if (Array.isArray(memberRow.account_breakdown)) {
+        for (const entry of memberRow.account_breakdown) merged.account_breakdown.push({ ...entry, app_id: m.app_id, game_name: memberRow.name });
+      }
+    }
+    if (gotw) {
+      merged.qualifies_double_xp = members.some(m =>
+        qualifiesForDoubleXp(playerId, m.app_id, gotw.group_app_id) ||
+        qualifiesForDoubleXp(playerId, m.app_id, personal)
+      );
+    }
+    groupRows.push(merged);
+  }
+
+  for (const r of byApp.values()) {
+    if (!consumed.has(r.app_id)) groupRows.push(r);
+  }
+  return groupRows;
+}
+
+function getEffectiveLedgerEntriesForPlayer(playerId, opts = {}) {
+  return applyMergeGroupsToGameMap(playerId, aggregateUserGamesByApp(playerId, !!opts.includeMeta), opts);
 }
 
 // ---------- Steam helpers (Phase 2/3) ----------
@@ -1000,7 +1181,7 @@ app.get('/api/users/:id/games', requireSetup, (req, res) => {
       existing.account_breakdown.push(accBreakdownEntry);
     }
   }
-  const rows = [...byAppId.values()];
+  const rows = applyMergeGroupsToGameMap(userId, byAppId, { gotwPicks: getCurrentGotWPicks() });
 
   // Compute "contract" stats per the original Ledger's model
   let totalSpent = 0, totalHours = 0, totalDebt = 0;
@@ -1035,6 +1216,103 @@ app.get('/api/users/:id/games', requireSetup, (req, res) => {
       counts,
     }
   });
+});
+
+app.get('/api/users/:id/merge-groups', requireSetup, (req, res) => {
+  const userId = parseInt(req.params.id);
+  if (!db.prepare('SELECT id FROM users WHERE id = ?').get(userId)) return res.status(404).json({ error: 'Profile not found' });
+  res.json({ ok: true, merge_groups: getMergedGamesForPlayer(userId) });
+});
+
+function normaliseMergeAppIds(raw) {
+  return [...new Set((raw || []).map(Number).filter(id => Number.isInteger(id)))];
+}
+
+function validateMergeApps(userId, appIds, groupId = null) {
+  if (appIds.length < 2) return 'Choose at least two games to merge';
+  const placeholders = appIds.map(() => '?').join(',');
+  const owned = db.prepare(`SELECT DISTINCT app_id FROM user_games WHERE user_id = ? AND app_id IN (${placeholders})`)
+    .all(userId, ...appIds).map(r => r.app_id);
+  if (owned.length !== appIds.length) return 'Every merged game must already be in this player library';
+  const existing = db.prepare(`SELECT app_id, group_id FROM game_merge_members
+    WHERE user_id = ? AND app_id IN (${placeholders})`).all(userId, ...appIds);
+  const conflict = existing.find(r => !groupId || r.group_id !== groupId);
+  if (conflict) return `App ${conflict.app_id} is already in another merge group`;
+  return null;
+}
+
+app.post('/api/users/:id/merge-groups', requireSetup, (req, res) => {
+  const userId = parseInt(req.params.id);
+  if (!db.prepare('SELECT id FROM users WHERE id = ?').get(userId)) return res.status(404).json({ error: 'Profile not found' });
+  const appIds = normaliseMergeAppIds(req.body?.appIds || req.body?.mergedAppIds);
+  const primaryAppId = Number(req.body?.primaryAppId || req.body?.primary_app_id || appIds[0]);
+  if (!appIds.includes(primaryAppId)) return res.status(400).json({ error: 'Primary game must be in the merge group' });
+  const validation = validateMergeApps(userId, appIds);
+  if (validation) return res.status(400).json({ error: validation });
+
+  const now = new Date().toISOString();
+  const id = `merge_${crypto.randomBytes(8).toString('hex')}`;
+  db.transaction(() => {
+    db.prepare(`INSERT INTO game_merge_groups (id, user_id, primary_app_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)`).run(id, userId, primaryAppId, now, now);
+    const add = db.prepare('INSERT INTO game_merge_members (group_id, user_id, app_id) VALUES (?, ?, ?)');
+    for (const appId of appIds) add.run(id, userId, appId);
+  })();
+  logger.info('Game merge group created', { user_id: userId, group_id: id, primary_app_id: primaryAppId, app_ids: appIds });
+  if (app.locals.broadcastLeaderboardUpdate) app.locals.broadcastLeaderboardUpdate(userId, 'merge_group_create');
+  res.json({ ok: true, merge_group: serialiseMergeGroup(db.prepare('SELECT * FROM game_merge_groups WHERE id = ?').get(id)) });
+});
+
+app.patch('/api/users/:id/merge-groups/:groupId', requireSetup, (req, res) => {
+  const userId = parseInt(req.params.id);
+  const groupId = req.params.groupId;
+  const group = db.prepare('SELECT * FROM game_merge_groups WHERE id = ? AND user_id = ?').get(groupId, userId);
+  if (!group) return res.status(404).json({ error: 'Merge group not found' });
+
+  const currentIds = db.prepare('SELECT app_id FROM game_merge_members WHERE group_id = ? ORDER BY app_id').all(groupId).map(r => r.app_id);
+  let nextIds = currentIds.slice();
+  if (req.body?.addAppId !== undefined) nextIds = [...new Set([...nextIds, Number(req.body.addAppId)])];
+  if (req.body?.removeAppId !== undefined) nextIds = nextIds.filter(id => id !== Number(req.body.removeAppId));
+  if (Array.isArray(req.body?.appIds) || Array.isArray(req.body?.mergedAppIds)) {
+    nextIds = normaliseMergeAppIds(req.body.appIds || req.body.mergedAppIds);
+  }
+
+  if (nextIds.length < 2) {
+    db.transaction(() => {
+      db.prepare('DELETE FROM game_merge_members WHERE group_id = ?').run(groupId);
+      db.prepare('DELETE FROM game_merge_groups WHERE id = ?').run(groupId);
+    })();
+    logger.info('Game merge group dissolved', { user_id: userId, group_id: groupId });
+    if (app.locals.broadcastLeaderboardUpdate) app.locals.broadcastLeaderboardUpdate(userId, 'merge_group_dissolve');
+    return res.json({ ok: true, dissolved: true });
+  }
+
+  let primaryAppId = req.body?.primaryAppId !== undefined ? Number(req.body.primaryAppId) : group.primary_app_id;
+  if (!nextIds.includes(primaryAppId)) primaryAppId = nextIds[0];
+  const validation = validateMergeApps(userId, nextIds, groupId);
+  if (validation) return res.status(400).json({ error: validation });
+
+  const now = new Date().toISOString();
+  db.transaction(() => {
+    db.prepare('UPDATE game_merge_groups SET primary_app_id = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+      .run(primaryAppId, now, groupId, userId);
+    db.prepare('DELETE FROM game_merge_members WHERE group_id = ?').run(groupId);
+    const add = db.prepare('INSERT INTO game_merge_members (group_id, user_id, app_id) VALUES (?, ?, ?)');
+    for (const appId of nextIds) add.run(groupId, userId, appId);
+  })();
+  logger.info('Game merge group updated', { user_id: userId, group_id: groupId, primary_app_id: primaryAppId, app_ids: nextIds });
+  if (app.locals.broadcastLeaderboardUpdate) app.locals.broadcastLeaderboardUpdate(userId, 'merge_group_update');
+  res.json({ ok: true, merge_group: serialiseMergeGroup(db.prepare('SELECT * FROM game_merge_groups WHERE id = ?').get(groupId)) });
+});
+
+app.delete('/api/users/:id/merge-groups/:groupId', requireSetup, (req, res) => {
+  const userId = parseInt(req.params.id);
+  const groupId = req.params.groupId;
+  const result = db.prepare('DELETE FROM game_merge_groups WHERE id = ? AND user_id = ?').run(groupId, userId);
+  if (!result.changes) return res.status(404).json({ error: 'Merge group not found' });
+  logger.info('Game merge group deleted', { user_id: userId, group_id: groupId });
+  if (app.locals.broadcastLeaderboardUpdate) app.locals.broadcastLeaderboardUpdate(userId, 'merge_group_delete');
+  res.json({ ok: true });
 });
 
 // PATCH an individual game's per-user fields
@@ -2102,13 +2380,36 @@ function requireAdmin(req, res, next) {
 app.post('/api/admin/verify', (req, res) => res.json({ ok: verifyPassword(req.body?.password) }));
 app.get('/api/debug/info', requireAdmin, (req, res) => {
   const mem = process.memoryUsage();
+  const gotw = getCurrentGotWPicks();
+  const mergeRows = db.prepare(`SELECT mg.id, mg.user_id, u.display_name, mg.primary_app_id, pg.name AS primary_name,
+      GROUP_CONCAT(gm.app_id || ':' || COALESCE(g.name, 'Unknown'), ' | ') AS games
+    FROM game_merge_groups mg
+    JOIN users u ON u.id = mg.user_id
+    JOIN game_merge_members gm ON gm.group_id = mg.id
+    LEFT JOIN games g ON g.app_id = gm.app_id
+    LEFT JOIN games pg ON pg.app_id = mg.primary_app_id
+    GROUP BY mg.id
+    ORDER BY u.display_name COLLATE NOCASE, mg.created_at`).all();
   res.json({ version:VERSION, node_version:process.version, uptime_seconds:Math.floor(process.uptime()),
     memory_mb:{ rss:Math.round(mem.rss/1048576), heap:Math.round(mem.heapUsed/1048576) },
     db_stats:{
       users:db.prepare('SELECT COUNT(*) AS c FROM users').get().c,
       games:db.prepare('SELECT COUNT(*) AS c FROM games').get().c,
       user_games:db.prepare('SELECT COUNT(*) AS c FROM user_games').get().c,
-      sync_log:db.prepare('SELECT COUNT(*) AS c FROM sync_log').get().c },
+      sync_log:db.prepare('SELECT COUNT(*) AS c FROM sync_log').get().c,
+      merge_groups:db.prepare('SELECT COUNT(*) AS c FROM game_merge_groups').get().c },
+    merge_groups: mergeRows.map(r => {
+      const ids = String(r.games || '').split(' | ').filter(Boolean).map(x => Number(x.split(':')[0]));
+      const personal = gotw?.personal_picks?.[r.user_id] ?? gotw?.personal_picks?.[String(r.user_id)];
+      return {
+        player: r.display_name,
+        player_id: r.user_id,
+        merge_group_id: r.id,
+        primary_game: { app_id: r.primary_app_id, name: r.primary_name },
+        merged_games: String(r.games || '').split(' | ').filter(Boolean),
+        contains_double_xp_game: ids.includes(Number(gotw?.group_app_id)) || ids.includes(Number(personal)),
+      };
+    }),
     setup_complete:isSetupComplete(), log_files:fs.readdirSync(LOGS_DIR).sort() });
 });
 app.get('/api/admin/steam-metadata', requireAdmin, (req, res) => {
@@ -2231,22 +2532,7 @@ function computeUserXpReceipt(userId, gotwPicks) {
   const baselineMap = new Map();
   for (const b of baselines) baselineMap.set(b.app_id, b);
 
-  // Aggregate across Steam accounts: SUM playtime and price per app_id.
-  // Baseline is per (user_id, app_id) so no per-account baseline math needed.
-  const rawRows = db.prepare(`SELECT g.app_id, g.name, ug.playtime_minutes, ug.paid_price_cents, ug.play_status
-    FROM user_games ug JOIN games g ON g.app_id = ug.app_id
-    WHERE ug.user_id = ?`).all(userId);
-  const byApp = new Map();
-  for (const r of rawRows) {
-    const existing = byApp.get(r.app_id);
-    if (!existing) { byApp.set(r.app_id, { ...r }); continue; }
-    existing.playtime_minutes = (existing.playtime_minutes || 0) + (r.playtime_minutes || 0);
-    existing.paid_price_cents = (existing.paid_price_cents || 0) + (r.paid_price_cents || 0);
-    if (r.play_status === 'completed' || existing.play_status === 'completed') existing.play_status = 'completed';
-    else if (r.play_status === 'exempt' || existing.play_status === 'exempt') existing.play_status = 'exempt';
-    else if (r.play_status === 'free' || existing.play_status === 'free') existing.play_status = 'free';
-  }
-  const rows = [...byApp.values()];
+  const rows = getEffectiveLedgerEntriesForPlayer(userId, { gotwPicks });
 
   let totalXp = 0;
   let gotwBonus = 0;
@@ -2256,9 +2542,21 @@ function computeUserXpReceipt(userId, gotwPicks) {
   const groupApp = gotwPicks?.group_app_id || null;
 
   for (const r of rows) {
-    const baselineRow = baselineMap.get(r.app_id);
-    if (!baselineRow) continue; // no baseline yet — game added since baseline creation
-    const baseline = baselineRow.baseline_minutes || 0;
+    const memberIds = r.is_merged ? r.merged_app_ids : [r.app_id];
+    const baselineRows = memberIds.map(id => baselineMap.get(id)).filter(Boolean);
+    if (!baselineRows.length) continue; // no baseline yet — game added since baseline creation
+    let baseline = 0;
+    let baselineAt = null;
+    for (const appId of memberIds) {
+      const b = baselineMap.get(appId);
+      if (b) {
+        baseline += b.baseline_minutes || 0;
+        baselineAt = Math.max(baselineAt || 0, b.baseline_at || 0);
+      } else if (r.is_merged) {
+        const member = r.merged_games?.find(g => Number(g.app_id) === Number(appId));
+        baseline += member?.playtime_minutes || 0;
+      }
+    }
     const currentMinutes = r.playtime_minutes || 0;
     const delta = currentMinutes - baseline;
     if (delta <= 0) continue;
@@ -2275,8 +2573,8 @@ function computeUserXpReceipt(userId, gotwPicks) {
     const baseXp = minutesUnderThreshold / 60; // 1 XP per hour
 
     let bonusType = null;
-    if (r.app_id === groupApp) bonusType = 'Group Game of the Week';
-    if (r.app_id === personalApp) bonusType = bonusType ? 'Group + Personal Game of the Week' : 'Personal Game of the Week';
+    if (memberIds.some(id => qualifiesForDoubleXp(userId, id, groupApp))) bonusType = 'Group Game of the Week';
+    if (memberIds.some(id => qualifiesForDoubleXp(userId, id, personalApp))) bonusType = bonusType ? 'Group + Personal Game of the Week' : 'Personal Game of the Week';
     const multiplier = bonusType ? 1.5 : 1.0;
 
     const earned = baseXp * multiplier;
@@ -2297,7 +2595,9 @@ function computeUserXpReceipt(userId, gotwPicks) {
       total_xp: roundXp(earned),
       multiplier,
       bonus_type: bonusType,
-      baseline_at: baselineRow.baseline_at || null,
+      merge_group_id: r.merge_group_id || null,
+      merged_app_ids: r.merged_app_ids || null,
+      baseline_at: baselineAt || null,
     });
   }
 
@@ -2324,23 +2624,8 @@ function computeLeaderboard() {
   const gotwPicks = getCurrentGotWPicks();
 
   const result = users.map(u => {
-    // Aggregate across Steam accounts: SUM hours and price. A game is settled when
-    // total hours ≥ total price, regardless of which account played or paid.
-    const rawRows = db.prepare(`SELECT ug.app_id, ug.playtime_minutes, ug.playtime_last_2weeks, ug.paid_price_cents, ug.play_status, ug.completed_at
-      FROM user_games ug WHERE ug.user_id = ?`).all(u.id);
-    const byApp = new Map();
-    for (const r of rawRows) {
-      const existing = byApp.get(r.app_id);
-      if (!existing) { byApp.set(r.app_id, { ...r }); continue; }
-      existing.playtime_minutes = (existing.playtime_minutes || 0) + (r.playtime_minutes || 0);
-      existing.playtime_last_2weeks = (existing.playtime_last_2weeks || 0) + (r.playtime_last_2weeks || 0);
-      existing.paid_price_cents = (existing.paid_price_cents || 0) + (r.paid_price_cents || 0);
-      if (r.play_status === 'completed' || existing.play_status === 'completed') existing.play_status = 'completed';
-      else if (r.play_status === 'exempt' || existing.play_status === 'exempt') existing.play_status = 'exempt';
-      else if (r.play_status === 'free' || existing.play_status === 'free') existing.play_status = 'free';
-      if (r.completed_at && !existing.completed_at) existing.completed_at = r.completed_at;
-    }
-    const rows = [...byApp.values()];
+    // Effective rows respect per-player manual merge groups.
+    const rows = getEffectiveLedgerEntriesForPlayer(u.id, { gotwPicks });
 
     let totalSpent = 0, totalHours = 0, totalDebt = 0, hours2w = 0;
     const counts = { all: rows.length, contracts: 0, paid: 0, arrears: 0, outstanding: 0, free: 0, exempt: 0 };
@@ -2380,7 +2665,8 @@ function computeLeaderboard() {
     let personalGotW = null;
     const personalAppId = gotwPicks?.personal_picks?.[u.id] ?? gotwPicks?.personal_picks?.[String(u.id)];
     if (personalAppId) {
-      const aggregated = rows.find(r => r.app_id === Number(personalAppId));
+      const aggregated = rows.find(r => r.app_id === Number(personalAppId) ||
+        (Array.isArray(r.merged_app_ids) && r.merged_app_ids.map(Number).includes(Number(personalAppId))));
       const game = aggregated
         ? { ...db.prepare('SELECT app_id, name FROM games WHERE app_id = ?').get(personalAppId), ...aggregated }
         : db.prepare('SELECT app_id, name FROM games WHERE app_id = ?').get(personalAppId);

@@ -210,6 +210,30 @@
   </div>
 </div>
 
+<!-- =============== Manual Game Merge =============== -->
+<div class="modal-bg" id="modal-merge" style="display:none;">
+  <div class="modal">
+    <div class="modal-title">Merged games — <span id="merge-game-name"></span></div>
+    <div class="modal-sub" id="merge-subtitle"></div>
+    <div class="field">
+      <label for="merge-select">Add game</label>
+      <input id="merge-search" type="text" placeholder="Search your ledger..." autocomplete="off" />
+      <select id="merge-select"></select>
+    </div>
+    <div class="field" id="merge-create-primary-field" style="display:none;">
+      <label for="merge-create-primary">Primary game</label>
+      <select id="merge-create-primary"></select>
+    </div>
+    <div id="merge-games-list" class="merge-games-list"></div>
+    <div class="modal-actions">
+      <button class="tb-btn" id="merge-cancel">Close</button>
+      <button class="tb-btn" id="merge-add">Add game</button>
+      <button class="tb-btn primary" id="merge-save">Save primary</button>
+      <button class="tb-btn danger" id="merge-unmerge">Unmerge</button>
+    </div>
+  </div>
+</div>
+
 <!-- =============== Weekly XP Winner Pick =============== -->
 <div class="modal-bg" id="modal-xp-winner" style="display:none;">
   <div class="modal" style="max-width:560px;">
@@ -283,6 +307,7 @@ const state = {
     quick: new Set(),
   },
   editingNotesAppId: null,
+  editingMergeAppId: null,
 };
 
 const QUICK_FILTERS = {
@@ -506,13 +531,14 @@ function renderLedger() {
     ledger.querySelectorAll('[data-action="notes"]').forEach(el => el.addEventListener('click', () => openNotesModal(parseInt(el.dataset.appId))));
     ledger.querySelectorAll('[data-action="toggle-exempt"]').forEach(el => el.addEventListener('click', () => toggleExempt(parseInt(el.dataset.appId))));
     ledger.querySelectorAll('[data-action="toggle-complete"]').forEach(el => el.addEventListener('click', () => toggleComplete(parseInt(el.dataset.appId))));
-    ledger.querySelectorAll('[data-action="toggle-breakdown"]').forEach(el => el.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const appId = el.dataset.appId;
-      const panel = document.getElementById('breakdown-' + appId);
-      if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
-    }));
+    ledger.querySelectorAll('[data-action="merge"]').forEach(el => el.addEventListener('click', () => openMergeModal(parseInt(el.dataset.appId))));
   }
+  ledger.querySelectorAll('[data-action="toggle-breakdown"]').forEach(el => el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const panelId = el.dataset.panelId || ('breakdown-' + el.dataset.appId);
+    const panel = document.getElementById(panelId);
+    if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  }));
 }
 
 function renderRow(g) {
@@ -537,7 +563,7 @@ function renderRow(g) {
     ? `<div class="row-icon row-icon-custom">§</div>`
     : `<div class="row-icon"><img src="https://cdn.cloudflare.steamstatic.com/steam/apps/${g.app_id}/capsule_184x69.jpg" alt="" onerror="this.style.visibility='hidden'"></div>`;
   const ro = state.isOwnProfile ? '' : 'readonly tabindex="-1"';
-  const editAttr = state.isOwnProfile ? 'contenteditable="true"' : '';
+  const editAttr = state.isOwnProfile && !g.is_merged ? 'contenteditable="true"' : '';
 
   // Build per-account breakdown HTML when this row has account data and the user has ≥2 accounts
   let breakdownHtml = '';
@@ -557,6 +583,27 @@ function renderRow(g) {
       <div class="breakdown-row total">
         <span class="breakdown-label">Total</span>
         <span class="breakdown-hours">${g.hours.toFixed(1)}h</span>
+        <span class="breakdown-price">£${(g.price || 0).toFixed(2)}</span>
+      </div>
+    </div>`;
+  }
+  if (g.is_merged && Array.isArray(g.merged_games)) {
+    const rows = g.merged_games.map(m => `<div class="breakdown-row">
+      <span class="breakdown-label">${escHtml(m.name)} <small>#${m.app_id}${m.is_primary ? ' primary' : ''}</small></span>
+      <span class="breakdown-hours">${fmtHours((m.playtime_minutes || 0) / 60)}</span>
+      <span class="breakdown-price">£${((m.paid_price_cents || 0) / 100).toFixed(2)}</span>
+    </div>`).join('');
+    badgesHtml += state.isOwnProfile
+      ? ` <span class="account-badge clickable merge-badge" data-action="merge" data-app-id="${g.app_id}" title="Manage merged games">Merged game</span>`
+      : ` <span class="account-badge clickable merge-badge" data-action="toggle-breakdown" data-panel-id="merge-breakdown-${g.app_id}" title="Click for merged game breakdown">Merged game</span>`;
+    badgesHtml += ` <span class="account-badge clickable" data-action="toggle-breakdown" data-panel-id="merge-breakdown-${g.app_id}" title="Click for merged game breakdown">Includes ${g.merged_count || g.merged_games.length} games</span>`;
+    if (g.qualifies_double_xp) badgesHtml += ` <span class="account-badge double-xp-badge" title="This merged group contains a Game of the Week">Double XP</span>`;
+    breakdownHtml += `<div class="account-breakdown" id="merge-breakdown-${g.app_id}" style="display:none;">
+      <div class="breakdown-header">Merged game breakdown</div>
+      ${rows}
+      <div class="breakdown-row total">
+        <span class="breakdown-label">Combined</span>
+        <span class="breakdown-hours">${fmtHours(g.hours)}</span>
         <span class="breakdown-price">£${(g.price || 0).toFixed(2)}</span>
       </div>
     </div>`;
@@ -591,8 +638,9 @@ function renderRow(g) {
     </div>
     ${state.isOwnProfile ? `<div class="row-actions">
       <button class="row-btn" data-action="notes" data-app-id="${g.app_id}" title="Notes">${hasNotes ? '📝' : '✎'}</button>
-      <button class="row-btn" data-action="toggle-exempt" data-app-id="${g.app_id}" title="${kind === 'exempt' ? 'Re-include' : 'Mark exempt'}">${kind === 'exempt' ? '↺' : '×'}</button>
-      ${kind === 'arrears' || kind === 'outstanding' || g.isCompletedToggle ? `<button class="row-btn${completeButtonClass}" data-action="toggle-complete" data-app-id="${g.app_id}" title="${completeButtonTitle}">${completeButtonText}</button>` : ''}
+      ${!g.is_merged ? `<button class="row-btn" data-action="merge" data-app-id="${g.app_id}" title="Merge with another game">+</button>` : ''}
+      ${!g.is_merged ? `<button class="row-btn" data-action="toggle-exempt" data-app-id="${g.app_id}" title="${kind === 'exempt' ? 'Re-include' : 'Mark exempt'}">${kind === 'exempt' ? '↺' : '×'}</button>` : ''}
+      ${!g.is_merged && (kind === 'arrears' || kind === 'outstanding' || g.isCompletedToggle) ? `<button class="row-btn${completeButtonClass}" data-action="toggle-complete" data-app-id="${g.app_id}" title="${completeButtonTitle}">${completeButtonText}</button>` : ''}
     </div>` : ''}
   </article>`;
 }
@@ -720,6 +768,129 @@ $('notes-save').addEventListener('click', async () => {
   await patchGame(state.editingNotesAppId, { notes });
   $('modal-notes').style.display = 'none';
   state.editingNotesAppId = null;
+  await reload();
+});
+
+// ---------- manual merge ----------
+function mergeMembers(g) {
+  return g?.is_merged && Array.isArray(g.merged_games) ? g.merged_games : [g].filter(Boolean);
+}
+
+function renderMergeModal() {
+  const g = state.games.find(x => x.app_id === state.editingMergeAppId);
+  if (!g) return;
+  const members = mergeMembers(g);
+  const memberIds = new Set(members.map(m => Number(m.app_id)));
+  $('merge-game-name').textContent = g.name;
+  $('merge-subtitle').textContent = g.is_merged
+    ? `Includes ${members.length} games. Combined playtime is ${fmtHours(g.hours)}.`
+    : 'Choose another game, then save to create a reversible player-only merge.';
+
+  $('merge-games-list').innerHTML = members.map(m => `
+    <label class="merge-game-row">
+      <input type="radio" name="merge-primary" value="${m.app_id}" ${Number(m.app_id) === Number(g.primary_app_id || g.app_id) ? 'checked' : ''}>
+      <span>
+        <strong>${escHtml(m.name)}</strong>
+        <small>#${m.app_id} · ${fmtHours((m.playtime_minutes || 0) / 60)} · £${((m.paid_price_cents || 0) / 100).toFixed(2)}</small>
+      </span>
+      ${g.is_merged ? `<button type="button" class="row-btn" data-merge-remove="${m.app_id}" title="Remove from merge">×</button>` : ''}
+    </label>`).join('');
+
+  const query = String($('merge-search').value || '').toLowerCase().trim();
+  const candidates = state.games
+    .filter(x => !memberIds.has(Number(x.app_id)))
+    .filter(x => !query || String(x.name || '').toLowerCase().includes(query) || String(x.app_id).includes(query))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  $('merge-select').innerHTML = candidates.length
+    ? candidates.map(x => `<option value="${x.app_id}">${escHtml(x.name)}</option>`).join('')
+    : `<option value="">${query ? 'No games match' : 'No available games'}</option>`;
+  $('merge-create-primary-field').style.display = g.is_merged ? 'none' : '';
+  if (!g.is_merged) {
+    const selectedOther = candidates[0];
+    const primaryOptions = [g, selectedOther].filter(Boolean);
+    $('merge-create-primary').innerHTML = primaryOptions
+      .map(x => `<option value="${x.app_id}">${escHtml(x.name)}</option>`)
+      .join('');
+    $('merge-select').onchange = () => {
+      const other = state.games.find(x => Number(x.app_id) === Number($('merge-select').value));
+      $('merge-create-primary').innerHTML = [g, other].filter(Boolean)
+        .map(x => `<option value="${x.app_id}">${escHtml(x.name)}</option>`)
+        .join('');
+    };
+  } else {
+    $('merge-select').onchange = null;
+  }
+  $('merge-add').disabled = !candidates.length;
+  $('merge-unmerge').style.display = g.is_merged ? '' : 'none';
+  $('merge-games-list').querySelectorAll('[data-merge-remove]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      await updateMerge(g, { removeAppId: Number(btn.dataset.mergeRemove) });
+    });
+  });
+}
+
+function openMergeModal(appId) {
+  const g = state.games.find(x => x.app_id === appId);
+  if (!g) return;
+  state.editingMergeAppId = appId;
+  $('merge-search').value = '';
+  renderMergeModal();
+  $('modal-merge').style.display = 'flex';
+  setTimeout(() => $('merge-search').focus(), 0);
+}
+
+async function updateMerge(g, payload) {
+  if (g.is_merged) {
+    const r = await fetch(`/api/users/${state.viewingUserId}/merge-groups/${encodeURIComponent(g.merge_group_id)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    });
+    if (!r.ok) throw new Error((await r.json()).error || 'Merge update failed');
+  } else {
+    const other = Number(payload.addAppId || $('merge-select').value);
+    const primary = Number(payload.primaryAppId || $('merge-create-primary').value || g.app_id);
+    const appIds = [...new Set([Number(g.app_id), other])];
+    const r = await fetch(`/api/users/${state.viewingUserId}/merge-groups`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appIds, primaryAppId: appIds.includes(primary) ? primary : g.app_id })
+    });
+    if (!r.ok) throw new Error((await r.json()).error || 'Merge create failed');
+  }
+  await reload();
+  const next = state.games.find(x => x.merge_group_id === g.merge_group_id) || state.games.find(x => x.app_id === state.editingMergeAppId);
+  state.editingMergeAppId = next?.app_id || null;
+  if (state.editingMergeAppId) renderMergeModal();
+  else $('modal-merge').style.display = 'none';
+}
+
+$('merge-cancel').addEventListener('click', () => { $('modal-merge').style.display = 'none'; state.editingMergeAppId = null; });
+$('modal-merge').addEventListener('click', (e) => { if (e.target.id === 'modal-merge') $('modal-merge').style.display = 'none'; });
+$('merge-search').addEventListener('input', renderMergeModal);
+$('merge-search').addEventListener('keydown', async (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  const g = state.games.find(x => x.app_id === state.editingMergeAppId);
+  if (!g || !$('merge-select').value) return;
+  await updateMerge(g, { addAppId: Number($('merge-select').value) });
+});
+$('merge-add').addEventListener('click', async () => {
+  const g = state.games.find(x => x.app_id === state.editingMergeAppId);
+  if (!g || !$('merge-select').value) return;
+  await updateMerge(g, { addAppId: Number($('merge-select').value) });
+});
+$('merge-save').addEventListener('click', async () => {
+  const g = state.games.find(x => x.app_id === state.editingMergeAppId);
+  if (!g) return;
+  const primaryAppId = Number(document.querySelector('input[name="merge-primary"]:checked')?.value || g.app_id);
+  await updateMerge(g, g.is_merged ? { primaryAppId } : { primaryAppId, addAppId: Number($('merge-select').value) });
+});
+$('merge-unmerge').addEventListener('click', async () => {
+  const g = state.games.find(x => x.app_id === state.editingMergeAppId);
+  if (!g?.is_merged) return;
+  if (!confirm('Unmerge these games for your ledger? Original game data will stay intact.')) return;
+  const r = await fetch(`/api/users/${state.viewingUserId}/merge-groups/${encodeURIComponent(g.merge_group_id)}`, { method: 'DELETE' });
+  if (!r.ok) throw new Error((await r.json()).error || 'Unmerge failed');
+  $('modal-merge').style.display = 'none';
+  state.editingMergeAppId = null;
   await reload();
 });
 
